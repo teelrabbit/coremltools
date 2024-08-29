@@ -6,7 +6,9 @@
 """
 Utilities for the entire package.
 """
-
+from collections import OrderedDict as _OrderedDict
+import copy as _copy
+import gc as _gc
 import math as _math
 import os as _os
 import shutil as _shutil
@@ -16,15 +18,35 @@ import tempfile as _tempfile
 import warnings as _warnings
 from collections.abc import Iterable as _Iterable
 from functools import lru_cache as _lru_cache
+from typing import Callable as _Callable
+from typing import Dict as _Dict
+from typing import List as _List
 from typing import Optional as _Optional
+from typing import Tuple as _Tuple
 from typing import Union as _Union
 
 import numpy as _np
 
 import coremltools as _ct
+from coremltools import _logger
+from coremltools import _SPECIFICATION_VERSION_IOS_16, _SPECIFICATION_VERSION_IOS_18
 from coremltools import ComputeUnit as _ComputeUnit
 from coremltools import proto as _proto
+from coremltools.converters.mil import mil as _mil
+from coremltools.converters.mil.frontend.milproto import load as _milproto_to_pymil
+from coremltools.converters.mil.mil import Builder as _mb
+from coremltools.converters.mil.mil import Program as _Program
 from coremltools.converters.mil.mil.passes.defs.preprocess import NameSanitizer as _NameSanitizer
+from coremltools.converters.mil.mil.passes.defs.randomize import (
+    WeightRandomizer as _WeightRandomizer,
+)
+from coremltools.converters.mil.mil.passes.graph_pass import AbstractGraphPass as _AbstractGraphPass
+from coremltools.converters.mil.mil.passes.helper import block_context_manager as _block_context_manager
+from coremltools.converters.mil.mil.passes.pass_pipeline import (
+    PassPipelineManager as _PassPipelineManager,
+)
+from coremltools.converters.mil.mil.passes.pass_registry import PASS_REGISTRY as _PASS_REGISTRY
+from coremltools.converters.mil.mil.program import Placeholder as _Placeholder
 
 from .._deps import _HAS_SCIPY
 
@@ -67,13 +89,21 @@ def _create_mlpackage(
     package_path: _Optional[str] = None,
 ) -> str:
     """
-    Args:
-        proto_spec: The proto spec of the model.
-        weights_dir: Copy weights from this path to the mlpackage.
-        package_path: Place the created mlpackage at this path. Error out if this path is a non-empty directory.
 
-    Returns:
-        path to the mlpackage
+    Parameters
+    ----------
+    proto_spec
+        The proto spec of the model.
+
+    weights_dir
+        Copy weights from this path to the ``mlpackage``.
+
+    package_path
+        Place the created ``mlpackage`` at this path. Error out if this path is a non-empty directory.
+
+    Returns
+    -------
+    path to the ``mlpackage``.
     """
     if package_path is None:
         package_path = _tempfile.mkdtemp(suffix=_MLPACKAGE_EXTENSION)
@@ -121,17 +151,17 @@ def save_spec(spec, filename, auto_set_specification_version=False, weights_dir=
     Parameters
     ----------
     spec: Model_pb
-        Protobuf representation of the model
+        Protobuf representation of the model.
 
     filename: str
-        File path where the spec gets saved.
+        File path where the spec is saved.
 
     auto_set_specification_version: bool
-        If True, will always try to set specification version automatically.
+        If ``True``, will always try to set specification version automatically.
 
     weights_dir: str
         Path to the directory containing the weights.bin file. This is required
-        when the spec has model type mlprogram. If the mlprogram does not contain
+        when the spec has model type ``mlprogram``. If the ``mlprogram`` does not contain
         any weights, this path can be an empty directory.
 
     Examples
@@ -192,7 +222,7 @@ def save_spec(spec, filename, auto_set_specification_version=False, weights_dir=
 
 def load_spec(model_path: str) -> _proto.Model_pb2:
     """
-    Load a protobuf model specification from file (mlmodel) or directory (mlpackage).
+    Load a protobuf model specification from file (``mlmodel``) or directory (``mlpackage``).
 
     Parameters
     ----------
@@ -201,7 +231,7 @@ def load_spec(model_path: str) -> _proto.Model_pb2:
     Returns
     -------
     model_spec: Model_pb
-        Protobuf representation of the model
+        Protobuf representation of the model.
 
     Examples
     --------
@@ -239,7 +269,7 @@ def _get_nn_layers(spec):
     Returns
     -------
     [NN layer]
-        list of all layers (including layers from elements of a pipeline
+        list of all layers (including layers from elements of a pipeline).
 
     """
 
@@ -314,21 +344,21 @@ def _convert_neural_network_spec_weights_to_fp16(fp_spec):
 
 def _convert_neural_network_weights_to_fp16(full_precision_model):
     """
-    Utility function to convert a full precision (float) MLModel to a
-    half precision MLModel (float16).
+    Utility function to convert a full-precision (float) MLModel to a
+    half-precision MLModel (float16).
 
     Parameters
     ----------
     full_precision_model: MLModel
         Model which will be converted to half precision. Currently conversion
         for only neural network models is supported. If a pipeline model is
-        passed in then all embedded neural network models embedded within
+        passed in, then all embedded neural network models embedded within
         will be converted.
 
     Returns
     -------
     model: MLModel
-        The converted half precision MLModel
+        The converted half precision MLModel.
 
     """
     spec = full_precision_model.get_spec()
@@ -348,19 +378,19 @@ def _get_model(spec, compute_units=_ComputeUnit.ALL):
 
 def evaluate_regressor(model, data, target="target", verbose=False):
     """
-    Evaluate a CoreML regression model and compare against predictions
+    Evaluate a Core ML regression model and compare against predictions
     from the original framework (for testing correctness of conversion).
 
     Parameters
     ----------
     model: MLModel or str
-        A loaded MLModel or a path to a saved MLModel
+        A loaded MLModel or a path to a saved MLModel.
 
     data: Dataframe
-        Test data on which to evaluate the models
+        Test data on which to evaluate the models.
 
     target: str
-       Name of the column in the dataframe to be compared against the prediction
+       Name of the column in the dataframe to be compared against the prediction.
 
     verbose: bool
        Set to true for a more verbose output.
@@ -421,18 +451,18 @@ def evaluate_classifier(model, data, target="target", verbose=False):
     Parameters
     ----------
     filename: list of str or list of MLModel
-        File from where to load the model from (OR) a loaded
+        File to load the model from, or a loaded
         version of the MLModel.
 
     data: list of str or list of Dataframe
         Test data on which to evaluate the models (dataframe,
-        or path to a csv file).
+        or path to a CSV file).
 
     target: str
-       Column to interpret as the target column
+       Column to interpret as the target column.
 
     verbose: bool
-       Set to true for a more verbose output.
+       Set to true for more verbose output.
 
     See Also
     --------
@@ -483,15 +513,15 @@ def evaluate_classifier_with_probabilities(
     Parameters
     ----------
     filename: [str | Model]
-        File from where to load the model from (OR) a loaded
+        File to load the model from, or a loaded
         version of the MLModel.
 
     data: [str | Dataframe]
         Test data on which to evaluate the models (dataframe,
-        or path to a csv file).
+        or path to a CSV file).
 
     probabilities: str
-       Column to interpret as the probabilities column
+       Column to interpret as the probabilities column.
 
     verbose: bool
        Verbosity levels of the predictions.
@@ -561,12 +591,12 @@ def rename_feature(
         New name of the feature.
 
     rename_inputs: bool
-        Search for `current_name` only in the input features (i.e ignore output
-        features)
+        Search for ``current_name`` only in the input features (that is, ignore output
+        features).
 
     rename_outputs: bool
-        Search for `current_name` only in the output features (i.e ignore input
-        features)
+        Search for ``current_name`` only in the output features (that is, ignore input
+        features).
 
     Examples
     --------
@@ -751,9 +781,9 @@ def evaluate_transformer(model, input_data, reference_output, verbose=False):
 
     Parameters
     ----------
-    spec: list of str or list of MLModel
-        File from where to load the Model from (OR) a loaded
-        version of MLModel.
+    model: list of str or list of MLModel
+        File to load the Model from, or a loaded
+        version of the MLModel.
 
     input_data: list of dict
         Test data on which to evaluate the models.
@@ -825,7 +855,7 @@ def _has_custom_layer(spec):
     Returns
     -------
 
-    True if the protobuf specification contains a neural network with a custom layer, False otherwise.
+    ``True`` if the protobuf specification contains a neural network with a custom layer, ``False`` otherwise.
 
     """
 
@@ -840,7 +870,7 @@ def _has_custom_layer(spec):
 def _get_custom_layer_names(spec):
     """
 
-    Returns a list of className fields which appear in the given protobuf spec
+    Returns a list of ``className`` fields which appear in the given protobuf spec.
 
     Parameters
     ----------
@@ -848,8 +878,8 @@ def _get_custom_layer_names(spec):
 
     Returns
     -------
-
-    set(str) A set of unique className fields of custom layers that appear in the model.
+    set(str)
+        A set of unique ``className`` fields of custom layers that appear in the model.
 
     """
     layers = _get_nn_layers(spec)
@@ -872,8 +902,8 @@ def _get_custom_layers(spec):
 
     Returns
     -------
-
-    [NN layer] A list of custom layer implementations
+    [NN layer]
+        A list of custom layer implementations.
     """
     layers = _get_nn_layers(spec)
     layers_out = []
@@ -887,20 +917,21 @@ def _get_custom_layers(spec):
 def _replace_custom_layer_name(spec, oldname, newname):
     """
 
-    Substitutes newname for oldname in the className field of custom layers. If there are no custom layers, or no
-    layers with className=oldname, then the spec is unchanged.
+    Substitutes ``newname`` for ``oldname`` in the ``className`` field of custom layers. If there are no custom layers, or no
+    layers with ``className`` = ``oldname``, then the spec is unchanged.
 
     Parameters
     ----------
     spec: mlmodel spec
 
-    oldname: str The custom layer className to be replaced.
+    oldname: str
+        The custom layer ``className`` to be replaced.
 
-    newname: str The new className value to replace oldname
+    newname: str
+        The new ``className`` value to replace ``oldname``.
 
     Returns
     -------
-
     An mlmodel spec.
 
     """
@@ -964,12 +995,12 @@ def _get_input_names(spec):
 def convert_double_to_float_multiarray_type(spec):
     """
     Convert all double multiarrays feature descriptions (input, output, training input)
-    to float multiarrays
+    to float multiarrays.
 
     Parameters
     ----------
     spec: Model_pb
-        The specification containing the multiarrays types to convert
+        The specification containing the multiarrays types to convert.
 
     Examples
     --------
@@ -1009,7 +1040,7 @@ def compile_model(model: _proto.Model_pb2.Model, destination_path: _Optional[str
     model: Model_pb2
         Spec/protobuf to compile.
 
-        Note: an mlprogam which uses a blob file is not supported.
+        Note: an ``mlprogam`` which uses a blob file is not supported.
 
     destination_path: str
         Path where the compiled model will be saved.
@@ -1018,7 +1049,7 @@ def compile_model(model: _proto.Model_pb2.Model, destination_path: _Optional[str
     -------
 
     str : Path to compiled model directory
-        If the destination_path is specified, that is the value that will be returned.
+        If the ``destination_path`` is specified, that is the value that will be returned.
 
     Examples
     --------
@@ -1238,3 +1269,986 @@ def make_pipeline(
                 _shutil.copyfile(weight_file_path, dst + f"/{i}-weight.bin")
 
     return _ct.models.MLModel(pipeline_spec, compute_units=compute_units, weights_dir=dst)
+
+
+def _convert_model_spec_to_pymil_prog(
+    mlmodel: "_ct.models.MLModel",
+    specification_version: int,
+    pymil_load_func: _Callable,
+) -> _Program:
+    """
+    A utility that converts an ``mlprogram`` model into PyMIL program.
+    """
+    model_spec = mlmodel.get_spec()
+    model_type = model_spec.WhichOneof("Type")
+    if model_type in (
+        "neuralNetwork",
+        "neuralNetworkClassifier",
+        "neuralNetworkRegressor",
+        "pipeline",
+        "PipelineClassifier",
+        "PipelineRegressor",
+    ):
+        msg = (
+            "coremltools.optimize.coreml are meant to be used only with mlprogram typed coreml models. "
+            "This model has type {}. Please use coremltools.models.neural_network.quantization_utils.quantize_weights"
+            "instead to compress the weights of the model."
+        )
+        raise TypeError(msg.format(model_type))
+    elif model_type == "mlProgram":
+        pass
+    else:
+        raise TypeError("weight compression not applicable for model type {}".format(model_type))
+
+    prog = pymil_load_func(
+        model_spec=model_spec,
+        specification_version=specification_version,
+        file_weights_dir=mlmodel.weights_dir,
+    )
+    return prog
+
+
+def _apply_graph_pass(
+    mlmodel: "_ct.models.MLModel",
+    graph_pass: _AbstractGraphPass,
+    spec_version: int = _SPECIFICATION_VERSION_IOS_16,
+    skip_model_load: _Optional[bool] = None,
+    pymil_load_func: _Callable = _milproto_to_pymil.load,
+    return_pymil_prog: bool = False,
+) -> _Union["_ct.models.MLModel", _Program]:
+    # We do the lazy import to prevent circular import
+    from coremltools.converters.mil.converter import mil_convert as _mil_convert
+
+    if skip_model_load is None:
+        # Determine if skip the model load by the original mlmodel.
+        skip_model_load = mlmodel.__proxy__ is None
+
+    # Utility function which compresses a Core ML model
+    # Converts the full precision mlmodel into a pymil program
+    model_spec = mlmodel.get_spec()
+    specification_version = max(model_spec.specificationVersion, spec_version)
+    prog = _convert_model_spec_to_pymil_prog(mlmodel, specification_version, pymil_load_func)
+
+    # Apply graph pass.
+    assert isinstance(
+        graph_pass, _AbstractGraphPass
+    ), f"graph pass must be an AbstractGraphPass instance, but got {type(graph_pass)}"
+    graph_pass.apply(prog)
+
+    # An early return can prevent running all other optimization paths triggered by _mil_convert.
+    if return_pymil_prog:
+        return prog
+
+    # Convert the pymil program back to mlmodel
+    compressed_mlmodel = _mil_convert(
+        prog,
+        convert_to="mlprogram",
+        convert_from="milinternal",
+        specification_version=specification_version,
+        compute_units=mlmodel.compute_unit,
+        model_description=model_spec.description,
+        skip_model_load=skip_model_load,
+    )
+    return compressed_mlmodel
+
+
+def _try_get_weights_dir_path(mlpackage_path):
+    """
+    Try to find the weights in mlpackage and return the path to the weights directory if found.
+    Return None if not found.
+    :param mlpackage_path: str, path to the mlpackage directory
+    :return: path to the weights directory inside the mlpackage directory
+    """
+    weights_dir = None
+    try:
+        if _ModelPackage.isValid(mlpackage_path):
+            item_info = _ModelPackage(mlpackage_path).findItemByNameAuthor(
+                _WEIGHTS_DIR_NAME, _MLPACKAGE_AUTHOR_NAME
+            )
+            if item_info is not None:
+                weights_dir = item_info.path()
+    except:
+        pass
+    return weights_dir
+
+
+class MultiFunctionDescriptor:
+    """
+    This data class defines how to construct a multifunction model from different model sources.
+    Use the ``add_function`` method to specify the path to the source ``mlpackage``,
+    along with the source and target function names.
+
+    After setting the ``default_function_name`` to the ``MultiFunctionDescriptor`` instance,
+    you can export a multifunction model using the ``save_multifunction`` method.
+
+    Examples
+    --------
+    .. sourcecode:: python
+
+        from coremltools.utils import MultiFunctionDescriptor, save_multifunction
+
+        # Initialize a MultiFunctionDescriptor instance with functions in an existing mlpackage.
+        # desc will contain all functions in "my_model.mlpackage"
+        desc = MultiFunctionDescriptor("my_model.mlpackage")
+
+        # Construct a MultiFunctionDescriptor instance from scratch.
+        # The below code inserts the "main" function from "my_model.mlpackage" as "main_1",
+        # and inserts the "main" function from "my_model_2.mlpackage" as "main_2".
+        desc = MultiFunctionDescriptor()
+        desc.add_function(
+            model_path="my_model.mlpackage",
+            source_function_name="main",
+            target_function_name="main_1",
+        )
+        desc.add_function(
+            model_path="my_model_2.mlpackage",
+            source_function_name="main",
+            target_function_name="main_2",
+        )
+
+        # Each MultiFunctionDescriptor instance must have a default function name
+        # so it can be saved as a multifunction mlpackage on disk.
+        desc.default_function_name = "main_1"
+        save_multifunction(desc, "my_multifunction_model.mlpackage")
+
+    See Also
+    --------
+    save_multifunction
+
+    """
+
+    def __init__(self, model_path: _Optional[str] = None):
+        """
+        If ``model_path`` is passed to the constructor, it must be a str pointing to an
+        existing ``mlpackage`` on disk. The MultiFunctionDescriptor instance will be initiated
+        with the functions in ``model_path``.
+        """
+        self._default_function_name = None
+        self._name_to_source_function = {}
+        self._modelpath_to_functions = {}
+        self._modelpath_to_spec = {}
+
+        if model_path is not None:
+            self.add_model(model_path)
+
+    def _functions(self) -> _Dict[str, _Tuple[str, str]]:
+        """
+        Returns ``self._name_to_source_function``
+        """
+        return _copy.copy(self._name_to_source_function)
+
+    def _add_modelpath_to_cache(self, model_path: str) -> None:
+        """
+        Given an ``mlpackage`` path ``model_path``, this function caches related metadata.
+        """
+        if model_path in self._modelpath_to_functions:
+            return
+
+        try:
+            spec = load_spec(model_path)
+        except Exception as err:
+            raise ValueError(f"invalid model_path {model_path} with error {err} while loading.")
+
+        desc = spec.description
+
+        # For the protobuf in iOS17 and below, there was no `functions` field,
+        # so "main" is the only function associated with the model in those cases.
+        if len(desc.functions) == 0:
+            self._modelpath_to_functions[model_path] = ["main"]
+        else:
+            self._modelpath_to_functions[model_path] = [func.name for func in desc.functions]
+        self._modelpath_to_spec[model_path] = spec
+
+    @property
+    def default_function_name(self) -> _Union[str, None]:
+        return self._default_function_name
+
+    @default_function_name.setter
+    def default_function_name(self, val: str) -> None:
+        if not isinstance(val, str):
+            raise ValueError(f"default_function_name must be type of str. Got {val}.")
+        self._default_function_name = val
+
+    def add_function(
+        self, model_path: str, src_function_name: str, target_function_name: str
+    ) -> None:
+        """
+        Insert a ``src_function_name`` function from ``model_path`` as the 
+        ``target_function_name`` function in the multifunction descriptor.
+        """
+        self._add_modelpath_to_cache(model_path)
+
+        if src_function_name not in self._modelpath_to_functions[model_path]:
+            raise ValueError(f"src_function_name {src_function_name} not found in {model_path}.")
+
+        if target_function_name in self._name_to_source_function:
+            raise ValueError(f"function {target_function_name} already exist.")
+
+        self._name_to_source_function[target_function_name] = (model_path, src_function_name)
+
+    def add_model(self, model_path: str) -> None:
+        """
+        Insert all functions from the model in ``model_path`` into the multifunction descriptor.
+        The function names will remain the same as in the original model.
+        """
+        self._add_modelpath_to_cache(model_path)
+
+        for func_name in self._modelpath_to_functions[model_path]:
+            self.add_function(model_path, func_name, func_name)
+
+    def remove_function(self, function_name: str) -> None:
+        """
+        Remove a function ``function_name`` from the multifunction descriptor.
+        """
+        if function_name not in self._name_to_source_function:
+            raise ValueError(f"function_name {function_name} not found.")
+        del self._name_to_source_function[function_name]
+
+
+def _multifunction_program_append_unifunction_program(
+    multifunction_prog: _mil.Program,
+    unifunction_prog: _mil.Program,
+    src_func_name: str,
+    target_func_name: str,
+) -> None:
+    multifunction_prog.add_function(target_func_name, unifunction_prog.functions[src_func_name])
+
+
+def save_multifunction(
+    desc: MultiFunctionDescriptor,
+    destination_path: str,
+):
+    """
+    Save a MultiFunctionDescriptor instance into a multifunction ``mlpackage``.
+    This function also performs constant deduplication across functions to allow for weight sharing.
+
+    Parameters
+    ----------
+    desc : MultiFunctionDescriptor
+        Multifunction descriptor to save on the disk.
+
+    destination_path : str
+        The path where the new ``mlpackage`` will be saved.
+
+    Examples
+    --------
+    .. sourcecode:: python
+
+        from coremltools.utils import MultiFunctionDescriptor, save_multifunction
+
+        desc = MultiFunctionDescriptor("my_model_1.mlpackage")
+        desc.add_function("my_model_2.mlpackage", "main", "main_2")
+        desc.default_function_name = "main_2"
+
+        save_multifunction(desc, "multifunction_model.mlpackage")
+
+    See Also
+    --------
+    MultiFunctionDescriptor
+
+    """
+    # We do the lazy import to prevent circular import
+    from coremltools.converters.mil.converter import mil_convert as _mil_convert
+
+    def get_function_spec(
+        spec: _proto.Model_pb2, func_name: str
+    ) -> _proto.Model_pb2.FunctionDescription:
+        """
+        Utils to construct a FunctionDescription from the source spec.
+        """
+        model_desc = spec.description
+        # For single function model, we construct the FunctionDescription ourselves
+        if len(model_desc.functions) == 0:
+            assert func_name == "main", f"invalid function name {func_name}"
+            return _proto.Model_pb2.FunctionDescription(
+                input=model_desc.input,
+                output=model_desc.output,
+                state=model_desc.state,
+                predictedFeatureName=model_desc.predictedFeatureName,
+                predictedProbabilitiesName=model_desc.predictedProbabilitiesName,
+            )
+        # For multifunction model, we look for the corresponding FunctionDescription
+        for func_desc in model_desc.functions:
+            if func_desc.name != func_name:
+                continue
+            res = _proto.Model_pb2.FunctionDescription()
+            res.CopyFrom(func_desc)
+            res.name = ""
+            return res
+
+    # compile model information: spec / weight_dir
+    modelpath_to_spec_and_weightdir = {}
+    for k, v in desc._name_to_source_function.items():
+        model_path = v[0]
+        if model_path in modelpath_to_spec_and_weightdir:
+            continue
+        spec = desc._modelpath_to_spec[model_path]
+        weight_dir = _try_get_weights_dir_path(model_path)
+        if weight_dir is None:
+            raise ValueError(f"weight_dir for model_path {model_path} not found.")
+        modelpath_to_spec_and_weightdir[model_path] = (spec, weight_dir)
+
+    # min spec version to support multi-functions model is iOS18
+    # we also make the target spec version the max among the input models
+    spec_version = max(
+        map(lambda val: val[0].specificationVersion, modelpath_to_spec_and_weightdir.values())
+    )
+    spec_version = max(spec_version, _SPECIFICATION_VERSION_IOS_18)
+
+    # convert spec into pymil program
+    modelpath_to_pymil = {}
+    for model_path, (spec, weight_dir) in modelpath_to_spec_and_weightdir.items():
+        prog = _milproto_to_pymil.load(
+            spec,
+            spec_version,
+            weight_dir,
+        )
+        modelpath_to_pymil[model_path] = prog
+
+    # construct a multifunction pymil program
+    multifunction_prog = _mil.Program()
+    function_to_desc = {}
+    for target_func_name, v in desc._name_to_source_function.items():
+        model_path = v[0]
+        src_func_name = v[1]
+        prog = modelpath_to_pymil[model_path]
+        _ct.utils._multifunction_program_append_unifunction_program(
+            multifunction_prog, prog, src_func_name, target_func_name
+        )
+
+        # get the corresponding function description from the spec
+        spec = modelpath_to_spec_and_weightdir[model_path][0]
+        function_spec = get_function_spec(spec, src_func_name)
+        assert function_spec.name == "", "function_spec should not have name set"
+        function_spec.name = target_func_name
+        function_to_desc[target_func_name] = function_spec
+
+    # Here we deduplicate the same weights across functions, to allow consts to use
+    # the same blob file value when lowered into milproto.
+    # By weight sharing, we can make the model size as small as we could.
+    graph_pass = _PASS_REGISTRY["common::const_deduplication"]
+    graph_pass._deduplicate_const_across_functions(multifunction_prog)
+
+    # set default function name
+    default_function_name = desc.default_function_name
+    if default_function_name is None:
+        raise ValueError(
+            "default_function_name must be set for the MultiFunctionDescriptor instance before calling save_multifunction."
+        )
+
+    if default_function_name not in multifunction_prog.functions:
+        raise ValueError(
+            f"default_function_name {default_function_name} not found in the program. Available functions names are {list(multifunction_prog.functions.keys())}"
+        )
+    multifunction_prog.default_function_name = default_function_name
+
+    # export program into multi-functions CoreML model
+    functions = []
+    for func in multifunction_prog.functions:
+        functions.append(function_to_desc[func])
+    model_description = _proto.Model_pb2.ModelDescription(
+        functions=functions,
+        defaultFunctionName=default_function_name,
+    )
+    multifunction_prog.skip_all_passes = True
+    mlmodel = _mil_convert(
+        multifunction_prog,
+        convert_to="mlprogram",
+        convert_from="milinternal",
+        specification_version=spec_version,
+        compute_units=_ct.ComputeUnit.CPU_ONLY,
+        model_description=model_description,
+        export_multi_functions=True,
+        skip_model_load=True,
+    )
+    mlmodel.save(destination_path)
+
+
+def materialize_dynamic_shape_mlmodel(
+    dynamic_shape_mlmodel: "_ct.models.MLModel",
+    function_name_to_materialization_map: _Dict[str, _Dict[str, _Tuple[int]]],
+    destination_path: str,
+    source_function_name: str = "main",
+) -> None:
+    """
+    Given a dynamic-shape mlmodel, materialize symbols to create fixed-shape functions,
+    then save as an .mlpackage to destination path.
+    To save memory, the pymil program of input dynamic-shape mlmodel is re-used.
+    Constant deduplication across functions is performed to allow weight sharing.
+
+    Parameters
+    ----------
+    dynamic_shape_mlmodel : ct.models.MLModel
+        A dynamic-shape mlmodel to be materialized
+
+    function_name_to_materialization_map: Dict[str, Dict[str, Tuple[int]]]
+        A dictionary specifying the name of new functions to be created,
+        and for each new function what is the new fixed shapes for inputs.
+        If a new function has the same name as an old function,
+        then the old function will be overridden
+
+    destination_path : str
+        The saved .mlpackage model path
+
+    source_function_name: str
+        The name of the source symbolic-shape function to be materialized, default = main
+
+    Examples
+    --------
+    .. sourcecode:: python
+
+        from coremltools.utils import materialize_dynamic_shape_mlmodel
+
+        # A dynamic-shape mlmodel you have converted
+        dynamic_shape_mlmodel: ct.models.MLModel
+
+        # As an example, let us assume the inputs are
+        # 1. ``input_ids (1, query_length)``
+        # 2. ``mask (query_length, context_length)``
+        function_name_to_materialization_map = {
+            "function_name_to_materialization_map": {
+                "materialization_2_3": {"input_ids": (1, 2), "mask": (2, 3)},
+                "materialization_4_5": {"input_ids": (1, 4), "mask": (4, 5)},
+            }
+        }
+
+        materialize_dynamic_shape_mlmodel(
+            dynamic_shape_mlmodel,
+            function_name_to_materialization_map,
+            "materialized_model.mlpackage",
+        )
+
+    To make prediction from the materialized mlmodel, load the desired materialized function
+
+    .. sourcecode:: python
+
+        materialization_2_3 = ct.models.MLModel(
+            "materialized_model.mlpackage", function_name="materialization_2_3"
+        )
+        materialization_4_5 = ct.models.MLModel(
+            "materialized_model.mlpackage", function_name="materialization_4_5"
+        )
+
+    See Also
+    --------
+    coremltools.converters.mil.mil.passes.defs.experiment.materialize_symbolic_shape_program
+
+    """
+    # We do the lazy import to prevent circular import
+    from coremltools.converters.mil.converter import mil_convert as _mil_convert
+
+    if not isinstance(dynamic_shape_mlmodel, _ct.models.MLModel):
+        raise ValueError(
+            "Dynamic shape mlmodel must be type of ct.models.MLModel, "
+            f"but got {type(dynamic_shape_mlmodel)}"
+        )
+    for input in dynamic_shape_mlmodel._spec.description.input:
+        if input.type.WhichOneof("Type") != "multiArrayType":
+            raise NotImplementedError("Only tensor input is handled yet")
+    for output in dynamic_shape_mlmodel._spec.description.output:
+        if output.type.WhichOneof("Type") != "multiArrayType":
+            raise NotImplementedError("Only tensor output is handled yet")
+
+    if dynamic_shape_mlmodel._mil_program is not None:
+        dynamic_shape_prog = dynamic_shape_mlmodel._mil_program
+    else:
+        dynamic_shape_prog = _milproto_to_pymil.load(
+            dynamic_shape_mlmodel._spec,
+            dynamic_shape_mlmodel._spec.specificationVersion,
+            dynamic_shape_mlmodel.weights_dir,
+        )
+
+    # Materialize symbolic shapes, then run all optimization passes
+    pass_pipeline = _ct.PassPipeline.DEFAULT
+    pass_pipeline.insert_pass(0, "common::materialize_symbolic_shape_program")
+    pass_pipeline.set_options(
+        "common::materialize_symbolic_shape_program",
+        {
+            "function_name_to_materialization_map": function_name_to_materialization_map,
+            "source_function_name": source_function_name,
+        },
+    )
+    _PassPipelineManager.apply_pipeline(dynamic_shape_prog, pass_pipeline)
+
+    # Weights are duplicated in each materialized new function
+    # By default, graph pass const_deduplication will not deduplicate across functions,
+    # so we need to call it explicitly here
+    const_deduplication_pass = _PASS_REGISTRY["common::const_deduplication"]
+    const_deduplication_pass._deduplicate_const_across_functions(dynamic_shape_prog)
+
+    export_multi_functions = True
+    # If source function is the only function in source model,
+    # and source function is replaced with materialization,
+    # and materialization does not create other functions,
+    # then we will end up with a unifunction model
+    # Core ML distinguishs "unifunction model" and "multifunction model with only 1 function"
+    if (
+        len(dynamic_shape_prog.functions) == 1
+        and len(function_name_to_materialization_map) == 1
+        and source_function_name in function_name_to_materialization_map
+    ):
+        export_multi_functions = False
+
+    # Multifunciton is added in iOS 18, so
+    # * if export multifunction, then specification version has to be iOS 18+
+    # * else, specification version can be the same as original version
+    specification_version = dynamic_shape_mlmodel._spec.specificationVersion
+    if export_multi_functions:
+        specification_version = max(_ct.target.iOS18, specification_version)
+
+    dynamic_shape_prog.skip_all_passes = True
+    materialized_mlmodel = _mil_convert(
+        dynamic_shape_prog,
+        convert_from="milinternal",
+        convert_to="mlprogram",
+        specification_version=specification_version,
+        compute_units=_ct.ComputeUnit.CPU_ONLY,
+        export_multi_functions=export_multi_functions,
+        skip_model_load=True,
+    )
+    materialized_mlmodel.save(destination_path)
+
+
+def randomize_weights(mlmodel: "_ct.models.MLModel"):
+    """
+    Utility function to randomize weights
+
+    Parameters
+    ----------
+    mlmodel: MLModel
+        Model which will be randomized.
+
+    Returns
+    -------
+    model: MLModel
+        The MLModel with randomized weights.
+
+    Examples
+    --------
+    .. sourcecode:: python
+
+        import coremltools as ct
+
+        model = ct.models.MLModel("my_model.mlpackage")
+        randomized_mlmodel = ct.models.utils.randomize_weights(mlmodel)
+
+    """
+
+    randomized_mlmodel = _apply_graph_pass(
+        mlmodel, graph_pass=_WeightRandomizer(), skip_model_load=True
+    )
+
+    return randomized_mlmodel
+
+
+def bisect_model(
+    model: _Union[str, "_ct.models.MLModel"],
+    output_dir: str,
+    merge_chunks_to_pipeline: _Optional[bool] = False,
+    check_output_correctness: _Optional[bool] = True,
+):
+    """
+    Utility function to split a mlpackage model into two mlpackages of approximately same file size.
+
+    Parameters
+    ----------
+    model: str or MLModel
+        Path to the mlpackage file, or a Core ML model, to be split into two mlpackages of approximately same file size.
+
+    output_dir: str
+        Path to output directory where the two model chunks / pipeline model would be saved.
+
+        If the `model` is `{path}/{model_name}.mlpackage`, the chunk models are going to be saved as:
+        1. first chunk model: `{output_dir}/{model_name}_chunk1.mlpackage`
+        2. second chunk model: `{output_dir}/{model_name}_chunk2.mlpackage`
+        3. chunked pipeline model: `{output_dir}/{model_name}_chunked_pipeline.mlpackage`
+
+        If the `model` is type of `MLModel`, the chunk models are saved as:
+        1. first chunk model: `{output_dir}/chunk1.mlpackage`
+        2. second chunk model: `{output_dir}/chunk2.mlpackage`
+        3. chunked pipeline model: `{output_dir}/chunked_pipeline.mlpackage`
+
+    merge_chunks_to_pipeline: bool
+        If True, model chunks are managed inside a single pipeline model for easier asset maintenance.
+
+    check_output_correctness: bool
+        - If True, compares the outputs of original Core ML model with that of pipelined CoreML model chunks and reports PSNR in dB.
+        - Enabling this feature uses more memory. Disable it if your machine runs out of memory.
+
+    Examples
+    --------
+    .. sourcecode:: python
+
+        import coremltools as ct
+
+        model_path = "my_model.mlpackage"
+        output_dir = "./output/"
+
+        # The following code will produce two smaller models:
+        # `./output/my_model_chunk1.mlpackage` and `./output/my_model_chunk2.mlpackage`
+        # It also compares the output numerical of the original Core ML model with the chunked models.
+        ct.models.utils.bisect_model(
+            model_path,
+            output_dir,
+        )
+
+        # The following code will produce a single pipeline model `./output/my_model_chunked_pipeline.mlpackage`
+        ct.models.utils.bisect_model(
+            model_path,
+            output_dir,
+            merge_chunks_to_pipeline=True,
+        )
+
+        # You can also pass the MLModel object directly
+        mlmodel = ct.models.MLModel(model_path)
+        ct.models.utils.bisect_model(
+            mlmodel,
+            output_dir,
+            merge_chunks_to_pipeline=True,
+        )
+    """
+    # We do the lazy import to prevent circular import
+    from . import MLModel
+    from coremltools.converters.mil.converter import mil_convert as _mil_convert
+
+    def get_pymil_prog_and_spec_from_model(model):
+
+        # get the model spec and weight directory
+        if isinstance(model, str):
+            spec = load_spec(model)
+            weights_dir = _try_get_weights_dir_path(model)
+        else:
+            spec = model._spec
+            weights_dir = model.weights_dir
+
+        # convert the model spec into pymil program,
+        # we also convert operations into type of List
+        prog = _milproto_to_pymil.load(
+            spec,
+            spec.specificationVersion,
+            weights_dir,
+        )
+        if len(prog.functions) > 1 or "main" not in prog.functions:
+            raise ValueError("'bisect_model' only support model with a single 'main' function.")
+        
+        func = prog.functions["main"]
+        func.operations = list(func.operations)
+
+        return prog, spec
+
+    # check the input type of model
+    if not isinstance(model, (str, MLModel)):
+        raise ValueError(f"'model' must be type of [str, MLModel]. Got {type(model)}.")
+
+    # The below implementation assumes that the model is single function, with a "main" function.
+    prog, spec = get_pymil_prog_and_spec_from_model(model)
+    spec_version = spec.specificationVersion
+
+    # Compute the incision point by bisecting the program based on weights size
+    op_idx, first_chunk_weights_size, total_weights_size = _get_op_idx_split_location(prog)
+    main_block = prog.functions["main"]
+    incision_op = main_block.operations[op_idx]
+    _logger.info(
+        f"The incision op: name={incision_op.name}, type={incision_op.op_type}, index={op_idx}/{len(main_block.operations)}"
+    )
+    _logger.info(f"First chunk size = {first_chunk_weights_size:.2f} MB")
+    _logger.info(f"Second chunk size = {total_weights_size - first_chunk_weights_size:.2f} MB")
+
+    # Build first chunk (in-place modifies prog by declaring early exits and removing unused subgraph)
+    prog_chunk1 = _make_first_chunk_prog(prog, op_idx)
+
+    # Build the second chunk
+    # when the first chunk is created, the prog is modified in-place, so we need to re-convert a new pymil
+    # program for the second chunk.
+    prog_chunk2 = _make_second_chunk_prog(
+        get_pymil_prog_and_spec_from_model(model)[0],
+        op_idx,
+    )
+
+    # Convert the MIL Program objects into MLModels
+    # We skip_model_load if check_output_correctness=False
+    _logger.info("Converting the two programs")
+    model_chunk1 = _mil_convert(
+        prog_chunk1,
+        convert_to="mlprogram",
+        convert_from="milinternal",
+        specification_version=spec_version,
+        compute_units=_ct.ComputeUnit.CPU_ONLY,
+        skip_model_load=(not check_output_correctness),
+    )
+    del prog_chunk1
+    _gc.collect()
+    _logger.info("Conversion of first chunk done.")
+
+    model_chunk2 = _mil_convert(
+        prog_chunk2,
+        convert_to="mlprogram",
+        convert_from="milinternal",
+        specification_version=spec_version,
+        compute_units=_ct.ComputeUnit.CPU_ONLY,
+        skip_model_load=(not check_output_correctness),
+    )
+    del prog_chunk2
+    _gc.collect()
+    _logger.info("Conversion of second chunk done.")
+
+    # Verify output correctness
+    if check_output_correctness:
+        _logger.info("Verifying output correctness of chunks")
+
+        if isinstance(model, str):
+            mlmodel = _ct.models.MLModel(model, compute_units=_ct.ComputeUnit.CPU_ONLY)
+        else:
+            mlmodel = model
+
+        _verify_output_correctness_of_chunks(
+            full_model=mlmodel,
+            first_chunk_model=model_chunk1,
+            second_chunk_model=model_chunk2,
+        )
+
+    # save model chunks
+    _os.makedirs(output_dir, exist_ok=True)
+
+    if isinstance(model, str):
+        mlpackage_name = _os.path.basename(model)
+        name, _ = _os.path.splitext(mlpackage_name)
+        name += "_"
+    else:
+        name = ""
+
+    if merge_chunks_to_pipeline:
+        # Make a single pipeline model to manage the model chunks
+        pipeline_model = make_pipeline(model_chunk1, model_chunk2)
+        out_path_pipeline = _os.path.join(output_dir, name + "chunked_pipeline.mlpackage")
+        pipeline_model.save(out_path_pipeline)
+
+        # reload to ensure CPU placement
+        if check_output_correctness:
+            _logger.info("Verifying output correctness of pipeline model")
+            pipeline_model = _ct.models.MLModel(
+                out_path_pipeline, compute_units=_ct.ComputeUnit.CPU_ONLY
+            )
+            _verify_output_correctness_of_chunks(
+                full_model=mlmodel,
+                pipeline_model=pipeline_model,
+            )
+    else:
+        # Save the chunked models to disk
+        out_path_chunk1 = _os.path.join(output_dir, name + "chunk1.mlpackage")
+        out_path_chunk2 = _os.path.join(output_dir, name + "chunk2.mlpackage")
+        model_chunk1.save(out_path_chunk1)
+        model_chunk2.save(out_path_chunk2)
+        _logger.info(
+            f"Saved chunks in {output_dir} with the suffix _chunk1.mlpackage and _chunk2.mlpackage"
+        )
+
+def _verify_output_correctness_of_chunks(
+    full_model: "_ct.models.MLModel",
+    first_chunk_model: _Optional["_ct.models.MLModel"] = None,
+    second_chunk_model: _Optional["_ct.models.MLModel"] = None,
+    pipeline_model: _Optional["_ct.models.MLModel"] = None,
+) -> None:
+    """Verifies the end-to-end output correctness of full (original) model versus chunked models"""
+    # lazy import avoids circular error
+    from coremltools.converters.mil.testing_utils import random_gen_input_feature_type as random_gen_input_feature_type
+    from coremltools.converters.mil.testing_utils import compute_snr_and_psnr
+
+    def report_correctness(original_outputs: _np.ndarray, final_outputs: _np.ndarray, log_prefix: str):
+        """ Report PSNR values across two compatible tensors.
+        This util is from https://github.com/apple/ml-stable-diffusion/blob/main/python_coreml_stable_diffusion/torch2coreml.py#L80,
+        with a slightly modification.
+        """
+        ABSOLUTE_MIN_PSNR = 35
+
+        _, original_psnr = compute_snr_and_psnr(original_outputs, original_outputs)
+        _, final_psnr = compute_snr_and_psnr(original_outputs, final_outputs)
+
+        dB_change = final_psnr - original_psnr
+        _logger.info(
+            f"{log_prefix}: PSNR changed by {dB_change:.1f} dB ({original_psnr:.1f} -> {final_psnr:.1f})"
+        )
+
+        if final_psnr < ABSOLUTE_MIN_PSNR:
+            _logger.warning(f"{final_psnr:.1f} dB is low!")
+        else:
+            _logger.info(
+                f"{final_psnr:.1f} dB > {ABSOLUTE_MIN_PSNR} dB (minimum allowed) parity check passed"
+            )
+        return final_psnr
+
+    
+    # Generate inputs for first chunk and full model
+    input_dict = {}
+    for input_desc in full_model._spec.description.input:
+        input_dict[input_desc.name] = random_gen_input_feature_type(input_desc)
+
+    # Generate outputs for full model
+    outputs_from_full_model = full_model.predict(input_dict)
+
+    if pipeline_model is not None:
+        outputs_from_pipeline_model = pipeline_model.predict(input_dict)
+        final_outputs = outputs_from_pipeline_model
+
+    elif first_chunk_model is not None and second_chunk_model is not None:
+        # Generate outputs for first chunk
+        outputs_from_first_chunk_model = first_chunk_model.predict(input_dict)
+
+        # Prepare inputs for second chunk model from first chunk's outputs and regular inputs
+        second_chunk_input_dict = {}
+        for input_desc in second_chunk_model._spec.description.input:
+            if input_desc.name in outputs_from_first_chunk_model:
+                second_chunk_input_dict[input_desc.name] = outputs_from_first_chunk_model[
+                    input_desc.name
+                ]
+            else:
+                second_chunk_input_dict[input_desc.name] = input_dict[input_desc.name]
+
+        # Generate output for second chunk model
+        outputs_from_second_chunk_model = second_chunk_model.predict(second_chunk_input_dict)
+        final_outputs = outputs_from_second_chunk_model
+    else:
+        raise ValueError("Either a single Pipeline model or two model chunks should be provided.")
+
+    # Verify correctness across all outputs from second chunk and full model
+    for out_name in outputs_from_full_model.keys():
+        report_correctness(
+            original_outputs=outputs_from_full_model[out_name],
+            final_outputs=final_outputs[out_name],
+            log_prefix=f"{out_name}",
+        )
+
+
+def _get_op_idx_split_location(prog: _mil.Program) -> _Tuple[int, int, int]:
+    """Find the op that approximately bisects the graph as measure by weights size on each side"""
+    main_block = prog.functions["main"]
+    total_size_in_mb = 0
+
+    for op in main_block.operations:
+        if op.op_type == "const" and isinstance(op.val.val, _np.ndarray):
+            size_in_mb = op.val.val.size * op.val.val.itemsize / (1024 * 1024)
+            total_size_in_mb += size_in_mb
+    half_size = total_size_in_mb / 2
+
+    # Find the first non const op (single child), where the total cumulative size exceeds
+    # the half size for the first time
+    cumulative_size_in_mb = 0
+    for op in main_block.operations:
+        if op.op_type == "const" and isinstance(op.val.val, _np.ndarray):
+            size_in_mb = op.val.val.size * op.val.val.itemsize / (1024 * 1024)
+            cumulative_size_in_mb += size_in_mb
+
+        # Note: The condition "not op.op_type.startswith("const")" is to make sure that the
+        # incision op is neither of type "const" nor "constexpr_*" ops that
+        # are used to store compressed weights
+        if (
+            cumulative_size_in_mb >= half_size
+            and not op.op_type.startswith("const")
+            and len(op.outputs) == 1
+            and len(op.outputs[0].child_ops) == 1
+        ):
+            op_idx = main_block.operations.index(op)
+            return op_idx, cumulative_size_in_mb, total_size_in_mb
+
+    raise ValueError("Not able to find the bisect point in the model.")
+
+
+def _get_first_chunk_outputs(block: _mil.Block, op_idx: int) -> _List[_mil.Var]:
+    # Get the list of all vars that go across from first program (all ops from 0 to op_idx (inclusive))
+    # to the second program (all ops from op_idx+1 till the end). These all vars need to be made the output
+    # of the first program and the input of the second program
+    boundary_vars = set()
+    for i in range(op_idx + 1):
+        op = block.operations[i]
+        if not op.op_type.startswith("const"):
+            for var in op.outputs:
+                if var.val is None:  # only consider non const vars
+                    for child_op in var.child_ops:
+                        child_op_idx = block.operations.index(child_op)
+                        if child_op_idx > op_idx:
+                            boundary_vars.add(var)
+    return list(boundary_vars)
+
+
+@_block_context_manager
+def _add_fp32_casts(block: _mil.Block, boundary_vars: _List[_mil.Var]) -> None:
+    new_boundary_vars = []
+    for var in boundary_vars:
+        if var.dtype != _mil.types.fp16:
+            new_boundary_vars.append(var)
+        else:
+            fp32_var = _mb.cast(x=var, dtype="fp32", name=var.name)
+            new_boundary_vars.append(fp32_var)
+    return new_boundary_vars
+
+
+def _make_first_chunk_prog(
+    prog: _mil.Program,
+    op_idx: int,
+) -> _mil.Program:
+    """Build first chunk by declaring early outputs and removing unused subgraph"""
+    block = prog.functions["main"]
+    boundary_vars = _get_first_chunk_outputs(block, op_idx)
+
+    # Due to possible numerical issues, cast any fp16 var to fp32
+    new_boundary_vars = _add_fp32_casts(block, boundary_vars)
+
+    block.outputs.clear()
+    block.set_outputs(new_boundary_vars)
+    _PASS_REGISTRY["common::dead_code_elimination"](prog)
+    return prog
+
+
+def _make_second_chunk_prog(prog: _mil.Program, op_idx: int) -> _mil.Program:
+    """Build second chunk by rebuilding a pristine MIL Program from MLModel"""
+    block = prog.functions["main"]
+    block.opset_version = _ct.target.iOS16
+
+    # First chunk outputs are second chunk inputs (e.g. skip connections)
+    boundary_vars = _get_first_chunk_outputs(block, op_idx)
+
+    # This op will not be included in this program. Its output var will be made into an input
+    boundary_op = block.operations[op_idx]
+
+    # Add all boundary ops as inputs
+    with block:
+        for var in boundary_vars:
+            new_placeholder = _Placeholder(
+                sym_shape=var.shape,
+                dtype=var.dtype if var.dtype != _mil.types.fp16 else _mil.types.fp32,
+                name=var.name,
+            )
+
+            block._input_dict[new_placeholder.outputs[0].name] = new_placeholder.outputs[0]
+
+            block.function_inputs = tuple(block._input_dict.values())
+            new_var = None
+            if var.dtype == _mil.types.fp16:
+                new_var = _mb.cast(x=new_placeholder.outputs[0], dtype="fp16", before_op=var.op)
+            else:
+                new_var = new_placeholder.outputs[0]
+
+            block.replace_uses_of_var_after_op(
+                anchor_op=boundary_op,
+                old_var=var,
+                new_var=new_var,
+                # This is needed if the program contains "constexpr_*" ops. In normal cases, there are stricter
+                # rules for removing them, and their presence may prevent replacing this var.
+                # However in this case, since we want to remove all the ops in chunk 1, we can safely
+                # set this to True.
+                force_replace=True,
+            )
+
+    _PASS_REGISTRY["common::dead_code_elimination"](prog)
+
+    # Remove any unused inputs
+    new_input_dict = _OrderedDict()
+    for k, v in block._input_dict.items():
+        if len(v.child_ops) > 0:
+            new_input_dict[k] = v
+    block._input_dict = new_input_dict
+    block.function_inputs = tuple(block._input_dict.values())
+
+    return prog
+
+

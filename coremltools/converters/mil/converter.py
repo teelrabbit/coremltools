@@ -8,8 +8,8 @@ import warnings as _warnings
 from typing import Optional, Text, Tuple
 
 from coremltools.converters._profile_utils import _profile
-from coremltools.converters.mil import Program
 from coremltools.converters.mil.mil import Builder as mb
+from coremltools.converters.mil.mil import Program
 from coremltools.converters.mil.mil.types.symbolic import k_num_internal_syms, k_used_symbols
 from coremltools.models import MLModel
 from coremltools.models.model import _create_mlpackage
@@ -278,7 +278,7 @@ def mil_convert_to_proto(
         # If the client calls `mil_convert` directly, the `pass_pipeline` is None. To keep the
         # behaviour same as before, the quantization pass is removed in this situation.
         # TODO: rdar://106111553 ([Infra] Quantization Pass is skipped when `mil_convert` is called directly.)
-        main_pipeline = PassPipeline()
+        main_pipeline = kwargs.get("pass_pipeline", PassPipeline())
         main_pipeline.remove_passes({"common::add_fp16_cast", "common::add_int16_cast"})
     frontend_pipeline, backend_pipeline = _construct_other_pipelines(
         main_pipeline, convert_from, convert_to

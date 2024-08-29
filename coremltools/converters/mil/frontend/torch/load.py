@@ -12,7 +12,7 @@ from torch.jit._script import RecursiveScriptModule
 from coremltools import _logger as logger
 from coremltools._deps import _HAS_TORCH_EXPORT_API
 from coremltools.converters.mil.frontend.torch.converter import TorchConverter
-from coremltools.converters.mil.input_types import TensorType
+from coremltools.converters.mil.input_types import StateType, TensorType
 from coremltools.converters.mil.mil.program import Program
 
 from .converter import TorchConverter
@@ -29,6 +29,7 @@ def load(
     outputs: Optional[List[TensorType]] = None,
     cut_at_symbols: Optional[List[str]] = None,
     use_default_fp16_io: bool = False,
+    states: Optional[List[StateType]] = None,
     **kwargs
 ) -> Program:
     """
@@ -66,6 +67,9 @@ def load(
     """
 
     if _HAS_TORCH_EXPORT_API and isinstance(spec, ExportedProgram):
+        # TODO: rdar://115845792 ([Executorch] Handle user provided inputs/outputs in the convert API)
+        if states:
+            raise AssertionError("'states' argument should be None for ExportedProgram")
         model = spec
     else:
         model = _torchscript_from_spec(spec)
@@ -77,6 +81,7 @@ def load(
         cut_at_symbols,
         specification_version,
         use_default_fp16_io,
+        states,
     )
 
     return _perform_torch_convert(converter, debug)
@@ -102,6 +107,8 @@ def _torchscript_from_spec(model_spec: Union[str, RecursiveScriptModule]) -> Rec
             raise e
 
     elif isinstance(model_spec, _torch.jit.ScriptModule):
+        return model_spec
+    elif _HAS_TORCH_EXPORT_API and isinstance(model_spec, ExportedProgram):
         return model_spec
     else:
         raise TypeError(

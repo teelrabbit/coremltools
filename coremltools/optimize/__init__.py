@@ -3,4 +3,9 @@
 #  Use of this source code is governed by a BSD-3-clause license that can be
 #  found in the LICENSE.txt file or at https://opensource.org/licenses/BSD-3-Clause
 
+from coremltools._deps import _HAS_TORCH
+
 from . import coreml
+
+if _HAS_TORCH:
+    from . import torch

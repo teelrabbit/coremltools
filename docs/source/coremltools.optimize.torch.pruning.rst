@@ -1,5 +1,5 @@
-Training-Time Pruning
-=====================
+Pruning
+=======
 
 Pruning a model is the process of sparsifying the weight matrices of the
 model's layers, thereby reducing its storage size. You can also use pruning to reduce a
@@ -37,3 +37,20 @@ to prune neural network parameters.
 .. autoclass:: coremltools.optimize.torch.pruning.pruning_scheduler.ConstantSparsityScheduler
     :show-inheritance:
     :members: compute_sparsity
+
+
+SparseGPT
+---------
+
+.. autoclass:: coremltools.optimize.torch.layerwise_compression.LayerwiseCompressorConfig
+    :members: from_dict, as_dict, from_yaml, get_layers
+
+.. autoclass:: coremltools.optimize.torch.layerwise_compression.LayerwiseCompressor
+    :members: compress
+
+.. autoclass:: coremltools.optimize.torch.layerwise_compression.algorithms.ModuleSparseGPTConfig
+    :show-inheritance:
+
+.. autoclass:: coremltools.optimize.torch.layerwise_compression.algorithms.SparseGPT
+    :show-inheritance:
+

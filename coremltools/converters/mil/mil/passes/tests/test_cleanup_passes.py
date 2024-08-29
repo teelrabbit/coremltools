@@ -26,6 +26,7 @@ from coremltools.converters.mil.testing_utils import (
     assert_op_count_match,
     assert_same_output_names,
     get_op_names_in_program,
+    get_op_types_in_block,
     get_op_types_in_program,
 )
 
@@ -33,7 +34,130 @@ from .test_passes import _VALIDATE_MODEL, CONSTEXPR_FUNCS, CONSTEXPR_OPS
 
 
 class TestConstDeduplication:
-    def test_const_deduplication(self):
+    def test_const_deduplication_cross_functions(self):
+        val_1 = np.random.rand(
+            100,
+        )
+        val_2 = np.random.rand(
+            100,
+        )
+        val_3 = np.random.rand(
+            100,
+        )
+
+        @mb.function(
+            input_specs=[mb.TensorSpec((100,))],
+        )
+        def func(x):
+            const_1 = mb.const(val=val_1)
+            const_2 = mb.const(val=val_1)
+            const_3 = mb.const(val=val_2)
+            const_4 = mb.const(val=val_3)
+
+            x = mb.add(x=x, y=const_1)
+            x = mb.add(x=x, y=const_2)
+            x = mb.add(x=x, y=const_3)
+            return mb.add(x=x, y=const_4)
+
+        @mb.function(
+            input_specs=[mb.TensorSpec((100,))],
+        )
+        def func_1(x):
+            const_5 = mb.const(val=val_1)
+            const_6 = mb.const(val=val_2)
+
+            x = mb.add(x=x, y=const_5)
+            return mb.add(x=x, y=const_6)
+
+        prog = mil.Program()
+        prog.add_function("main", func)
+        prog.add_function("func_1", func_1)
+
+        # In the above case, const_1 and const_2 in main is going to deduplicated in a single const op first.
+        # And it will share the same weight_id with const_5 in func_1.
+        # const_3 / const_6 are going to share the same weight_id across functions.
+        # While const_6.weight_id remains None.
+        graph_pass = PASS_REGISTRY["common::const_deduplication"]
+        graph_pass._deduplicate_const_across_functions(prog)
+
+        # validate the prog
+        main_func = prog.functions["main"]
+        expected_ops = ["const", "const", "const", "add", "add", "add", "add"]
+        assert get_op_types_in_block(main_func, skip_const_ops=False) == expected_ops
+        const_ops = main_func.find_ops(op_type="const")
+        assert const_ops[0].weight_id == 0
+        assert const_ops[1].weight_id == 1
+        assert const_ops[2].weight_id is None
+
+        func_1 = prog.functions["func_1"]
+        expected_ops = [
+            "const",
+            "const",
+            "add",
+            "add",
+        ]
+        assert get_op_types_in_block(func_1, skip_const_ops=False) == expected_ops
+        const_ops = func_1.find_ops(op_type="const")
+        assert const_ops[0].weight_id == 0
+        assert const_ops[1].weight_id == 1
+
+    def test_const_deduplication_cross_functions_from_same_source(self):
+        """
+        In the case of users copying a source function into two functions,
+        same weight should be assigned with the same weighr_id as well.
+        """
+        val_1 = np.random.rand(
+            100,
+        )
+        val_2 = np.random.rand(
+            100,
+        )
+        val_3 = np.random.rand(
+            100,
+        )
+
+        @mb.function(
+            input_specs=[mb.TensorSpec((100,))],
+        )
+        def func(x):
+            const_1 = mb.const(val=val_1)
+            const_2 = mb.const(val=val_1)
+            const_3 = mb.const(val=val_2)
+            const_4 = mb.const(val=val_3)
+
+            x = mb.add(x=x, y=const_1)
+            x = mb.add(x=x, y=const_2)
+            x = mb.add(x=x, y=const_3)
+            return mb.add(x=x, y=const_4)
+
+        prog = mil.Program()
+        prog.add_function("func_1", func)
+        prog.add_function("func_2", func)
+
+        graph_pass = PASS_REGISTRY["common::const_deduplication"]
+        graph_pass._deduplicate_const_across_functions(prog)
+
+        # validate the prog
+        func_1 = prog.functions["func_1"]
+        expected_ops = ["const", "const", "const", "add", "add", "add", "add"]
+        assert get_op_types_in_block(func_1, skip_const_ops=False) == expected_ops
+        func_2 = prog.functions["func_2"]
+        assert get_op_types_in_block(func_2, skip_const_ops=False) == expected_ops
+
+        for func in [prog.functions["func_1"], prog.functions["func_2"]]:
+            const_ops = func.find_ops(op_type="const")
+            assert const_ops[0].weight_id == 0
+            assert const_ops[1].weight_id == 1
+            assert const_ops[2].weight_id == 2
+
+    @pytest.mark.parametrize(
+        "q_weight_key, k_weight_key",
+        itertools.product(
+            (None, "weight", "q_weight"),
+            (None, "weight", "k_weight"),
+        ),
+    )
+    def test_const_deduplication(self, q_weight_key, k_weight_key):
         BATCH_DIM = 5
         SEQUENCE_LENGTH = 4
         ENCODING_DIM = 256
@@ -49,19 +173,27 @@ class TestConstDeduplication:
         )
         def prog(q, k):
             q_e = mb.linear(x=q, weight=weight, bias=bias)
+            q_e.op.weight.op.weight_key = q_weight_key
             k_e = mb.linear(x=k, weight=weight, bias=bias)
+            k_e.op.weight.op.weight_key = k_weight_key
             attention = mb.matmul(x=q_e, y=k_e, transpose_y=True)
             return attention
 
         prev_prog, _, _ = apply_pass_and_basic_check(prog, "common::const_deduplication")
         assert_op_count_match(prev_prog, expect=6, op="const")
-        assert_op_count_match(prog, expect=4, op="const")
+        # bias will always be deduplicated
+        # weight will be deduplicated only when q and k have same weight key
+        assert_op_count_match(prog, expect=4 if q_weight_key == k_weight_key else 5, op="const")
 
     @pytest.mark.parametrize(
-        "constexpr_op",
-        CONSTEXPR_OPS,
+        "constexpr_op, q_bias_key, k_bias_key",
+        itertools.product(
+            CONSTEXPR_OPS,
+            (None, "weight", "q_weight"),
+            (None, "weight", "k_weight"),
+        ),
     )
-    def test_constexpr_deduplication(self, constexpr_op):
+    def test_constexpr_deduplication(self, constexpr_op, q_bias_key, k_bias_key):
         BATCH_DIM = 5
         SEQUENCE_LENGTH = 4
         ENCODING_DIM = 256
@@ -79,13 +211,17 @@ class TestConstDeduplication:
             bias_q = CONSTEXPR_FUNCS[constexpr_op]((EMBEDDING_DIM,), seed=29)
             bias_k = CONSTEXPR_FUNCS[constexpr_op]((EMBEDDING_DIM,), seed=29)
             q_e = mb.linear(x=q, weight=weight_q, bias=bias_q)
+            q_e.op.bias.op.weight_key = q_bias_key
             k_e = mb.linear(x=k, weight=weight_k, bias=bias_k)
+            k_e.op.bias.op.weight_key = k_bias_key
             attention = mb.matmul(x=q_e, y=k_e, transpose_y=True)
             return attention
 
         prev_prog, _, _ = apply_pass_and_basic_check(prog, "common::const_deduplication")
         assert_op_count_match(prev_prog, expect=4, op=constexpr_op)
-        assert_op_count_match(prog, expect=2, op=constexpr_op)
+        # weight will always be deduplicated
+        # bias will be deduplicated only when q and k have same weight key
+        assert_op_count_match(prog, expect=2 if q_bias_key == k_bias_key else 3, op=constexpr_op)
 
     def test_const_deduplication_as_outputs(self):
         """
@@ -1291,8 +1427,17 @@ class TestNoopElimination:
             expected_output_shapes={block.outputs[0].name: (10, 8)},
         )
 
-    def test_tile_elimination(self):
-        @mb.program(input_specs=[mb.TensorSpec(shape=(2, 4))])
+    @pytest.mark.parametrize(
+        "dynamic",
+        [True, False],
+    )
+    def test_tile_elimination(self, dynamic):
+        if dynamic:
+            input_shape = (get_new_symbol(), get_new_symbol())
+        else:
+            input_shape = (2, 4)
+
+        @mb.program(input_specs=[mb.TensorSpec(shape=input_shape)])
         def prog(x):
             r1 = mb.tile(x=x, reps=[1, 1])
             return mb.relu(x=r1)
@@ -2162,11 +2307,11 @@ class TestTopologicalReorder:
         def prog(x):
             x = mb.cast(x=x, dtype="fp16")
             x1 = mb.square(x=x)
-            x2 = mb.cast(x=x1, dtype="fp32")
+            x2 = mb.cast(x=x1, dtype="fp32", name="x2")
             x3 = mb.log(x=x)
-            x4 = mb.cast(x=x3, dtype="fp32")
+            x4 = mb.cast(x=x3, dtype="fp32", name="x4")
             x5 = mb.relu(x=x)
-            x6 = mb.cast(x=x5, dtype="fp32")
+            x6 = mb.cast(x=x5, dtype="fp32", name="x6")
             x7 = mb.relu(x=x6)
             return x2, x4, x7
 
@@ -2194,6 +2339,11 @@ class TestTopologicalReorder:
             "cast",
             "cast",
         ]
+
+        cast_ops = block.find_ops(op_type="cast")
+        assert cast_ops[1].outputs[0].name == "x6"
+        assert cast_ops[2].outputs[0].name == "x4"
+        assert cast_ops[3].outputs[0].name == "x2"
 
         assert_model_is_valid(
             prog,

@@ -6,11 +6,16 @@
 import os
 import warnings
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from coremltools import _OPSET, _SPECIFICATION_VERSION_IOS_15, _SPECIFICATION_VERSION_IOS_17
+from coremltools import (
+    _OPSET,
+    _SPECIFICATION_VERSION_IOS_15,
+    _SPECIFICATION_VERSION_IOS_17,
+    _SPECIFICATION_VERSION_IOS_18,
+)
 from coremltools import _logger as logger
 from coremltools import proto
 from coremltools.converters.mil import mil
@@ -57,13 +62,21 @@ except Exception as e:
     BlobWriter = None
 
 
-def should_use_weight_file(val):
+def should_use_weight_file(
+    val: Union[np.ndarray, np.generic],
+    specification_version: Optional[int] = _SPECIFICATION_VERSION_IOS_15,
+) -> bool:
+    # additional dtype are supported >= iOS18
+    supported_dtypes = ["float16", "float32", "uint8", "int8"]
+    if specification_version >= _SPECIFICATION_VERSION_IOS_18:
+        supported_dtypes += ["uint16", "int16", "int32", "uint32"]
     return (
         val is not None
         and isinstance(val, (np.ndarray, np.generic))
         and val.size >= 10
-        and val.dtype in ['float16', 'float32', 'uint8', 'int8']
+        and val.dtype in supported_dtypes
     )
+
 
 class MILProtoExporter:
     """
@@ -74,11 +87,25 @@ class MILProtoExporter:
         self,
         prog: Program,
         weights_dir: str,
+        specification_version: int,
     ):
         self.prog = prog
         self.weights_dir = weights_dir
+        self.specification_version = specification_version
         self.blob_writers = {}
+        self.weight_id_to_file_value = {}  # mapping from weight_id to file value
         self.prog.validate(check_essential_scope=True)
+
+    @staticmethod
+    def _get_valid_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Get a valid kwargs to initialize a MILProtoExporter object.
+        """
+        return {
+            "prog": kwargs["prog"],
+            "weights_dir": kwargs["weights_dir"],
+            "specification_version": kwargs["specification_version"],
+        }
 
     def translate_program_attributes(self) -> Dict[str, Any]:
         """
@@ -107,26 +134,50 @@ class MILProtoExporter:
     def create_file_value(self, var: Var) -> proto.MIL_pb2.Value:
         """
         Returns the mil proto file value of a var.
+        If weight_id is in self.weight_id_to_file_value, we return the value.
         """
-        weight_path = self.get_weight_path(var.op)
-        blob_writer = self.get_blob_writer(weight_path)
-        offset = helper._get_offset_by_writing_data(var, blob_writer)
-        weight_file_name = os.path.basename(weight_path)
 
-        return create_file_value_tensor(
-            file_name=os.path.join(
-                os.path.join("@model_path", _WEIGHTS_DIR_NAME), weight_file_name
-            ),
-            offset=offset,
-            dim=var.val.shape,
-            data_type=types_to_proto_primitive(var.sym_type.get_primitive()),
-        )
+        def create_file_value_helper():
+            weight_path = self.get_weight_path(var.op)
+            blob_writer = self.get_blob_writer(weight_path)
+            offset = helper._get_offset_by_writing_data(var, blob_writer)
+            weight_file_name = os.path.basename(weight_path)
+
+            # Get proto type for the primitive
+            if hasattr(var.sym_type, "get_primitive"):   #  tensor
+                primitive = var.sym_type.get_primitive()
+            else:   #  scalar
+                primitive = var.sym_type
+            proto_primitive = types_to_proto_primitive(primitive)
+
+            return create_file_value_tensor(
+                file_name=os.path.join(
+                    os.path.join("@model_path", _WEIGHTS_DIR_NAME), weight_file_name
+                ),
+                offset=offset,
+                dim=var.val.shape,
+                data_type=proto_primitive,
+            )
+
+        # use the cached file value
+        weight_id = var.op.weight_id
+        if weight_id is None:
+            return create_file_value_helper()
+
+        if weight_id in self.weight_id_to_file_value:
+            assert weight_id is not None, "invalid weight_id"
+            return self.weight_id_to_file_value[weight_id]
+
+        file_value = create_file_value_helper()
+        self.weight_id_to_file_value[weight_id] = file_value
+
+        return file_value
 
     def get_milproto_value(self, var: Var) -> proto.MIL_pb2.Value:
         """
         Translate a pymil Var into milproto value.
         """
-        if should_use_weight_file(var.val):
+        if should_use_weight_file(var.val, self.specification_version):
             return self.create_file_value(var)
         else:
             return create_immediate_value(var)
@@ -241,8 +292,64 @@ class MILProtoExporter:
             return create_valuetype_list(length=length, elem_shape=elem_shape, dtype=dtype)
         elif types.is_dict(valuetype):
             return self.create_valuetype_dict(valuetype.T[0], valuetype.T[1])
+        elif types.is_state(valuetype):
+            wrapped_type = valuetype.wrapped_type()
+            v_type = proto.MIL_pb2.ValueType()
+            v_type.stateType.wrappedType.CopyFrom(self.types_to_proto(wrapped_type))
+            return v_type
         else:
             return create_valuetype_scalar(types_to_proto_primitive(valuetype))
+
+    def translate_coreml_update_state_op(self, op: Operation) -> List[proto.MIL_pb2.Operation]:
+        """
+        ``coreml_update_state`` is decomposed into ``write_state`` and ``read_state``.
+        """
+
+        def get_input_binding(param_name: str) -> proto.MIL_pb2.Argument:
+            arguments = [proto.MIL_pb2.Argument.Binding(name=op.inputs[param_name].name)]
+            args = proto.MIL_pb2.Argument()
+            args.arguments.extend(arguments)
+            return args
+
+        res = []
+
+        # write_state
+        write_state_attrs = {"name": create_scalar_value(op.name + "_write_state")}
+        write_state_inputs = {
+            "input": get_input_binding("state"),
+            "data": get_input_binding("value"),
+        }
+        res.append(
+            proto.MIL_pb2.Operation(
+                type="write_state",
+                inputs=write_state_inputs,
+                attributes=write_state_attrs,
+            )
+        )
+
+        # If the coreml_update_state is not feed into any ops or is not block outputs,
+        # we don't need the read_state op
+        if len(op.outputs[0].child_ops) == 0 and len(op.outputs[0].consuming_blocks) == 0:
+            return res
+
+        # read_state
+        read_state_attrs = {"name": create_scalar_value(op.name)}
+        read_state_inputs = {
+            "input": get_input_binding("state"),
+        }
+        outputs = [
+            proto.MIL_pb2.NamedValueType(name=v.name, type=self.types_to_proto(v.sym_type))
+            for v in op.outputs
+        ]
+        res.append(
+            proto.MIL_pb2.Operation(
+                type="read_state",
+                inputs=read_state_inputs,
+                attributes=read_state_attrs,
+                outputs=outputs,
+            )
+        )
+        return res
 
     def translate_generic_op(
         self, op: Operation, literal_params: Optional[List[str]] = None
@@ -358,12 +465,10 @@ class MILProtoExporter:
                 # rdar://98689808 (Reshape_like should also accept const value from non literal input)
                 literal_params = ["begins", "ends", "end_masks"]
                 proto_ops.append(self.translate_generic_op(op, literal_params))
+            elif op_cls_name == "coreml_update_state":
+                proto_ops.extend(self.translate_coreml_update_state_op(op))
             else:
-                # A single pymil op might be decomposed into multiple ops
-                ops = self.translate_generic_op(op)
-                if not isinstance(ops, list):
-                    ops = [ops]
-                proto_ops.extend(ops)
+                proto_ops.append(self.translate_generic_op(op))
 
         inputs = []
         if not isinstance(block, Function):
@@ -390,9 +495,7 @@ class MILProtoExporter:
             inputs=inputs, opset=opset, block_specializations={opset: block}
         )
 
-    def export(
-        self, specification_version: Optional[str] = _SPECIFICATION_VERSION_IOS_15
-    ) -> proto.MIL_pb2.Program:
+    def export(self) -> proto.MIL_pb2.Program:
         """
         Export a pymil program into mil proto with the given specification version.
         """
@@ -401,7 +504,9 @@ class MILProtoExporter:
 
         function_protos = {}
         for func_name, func in self.prog.functions.items():
-            function_protos[func_name] = self.convert_function(func, _OPSET[specification_version])
+            function_protos[func_name] = self.convert_function(
+                func, _OPSET[self.specification_version]
+            )
 
         kwargs = {
             "version": 1,
@@ -491,8 +596,6 @@ class CoreMLProtoExporter:
     An utility class to export a pymil program to coreml model.
     """
 
-    _DEFAULT_FUNCTION_NAME = "main"
-
     def __init__(
         self,
         prog: mil.Program,
@@ -502,6 +605,7 @@ class CoreMLProtoExporter:
         classifier_config: ClassifierConfig,
         convert_to: str,
         convert_from: str,
+        export_multi_functions: bool,
     ):
         self.prog = prog
         self.mil_proto = mil_proto
@@ -510,23 +614,26 @@ class CoreMLProtoExporter:
         self.classifier_config = classifier_config
         self.convert_to = convert_to
         self.convert_from = convert_from
+        self.export_multi_functions = export_multi_functions
         self.prog.validate(check_essential_scope=True)
 
     @staticmethod
-    def get_additional_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    def _decouple_state_and_input(
+        input_features: List[proto.Model_pb2.FeatureDescription],
+    ) -> Tuple[List[proto.Model_pb2.FeatureDescription], List[proto.Model_pb2.FeatureDescription]]:
         """
-        Get additional coreml proto related kwargs.
+        Utils seperates state input from non-state input features.
         """
-        return {}
+        state_features = []
+        non_state_input_features = []
 
-    @staticmethod
-    def _try_convert_other_input_type(
-        input_var: Var, input_features: List[proto.Model_pb2.FeatureDescription]
-    ) -> bool:
-        """
-        Try to convert an input var with additional type.
-        """
-        return False
+        for input in input_features:
+            if input.type.WhichOneof("Type") == "stateType":
+                state_features.append(input)
+            else:
+                non_state_input_features.append(input)
+
+        return state_features, non_state_input_features
 
     def get_func_input(self, func: mil.Function) -> List[proto.Model_pb2.FeatureDescription]:
         """
@@ -615,7 +722,36 @@ class CoreMLProtoExporter:
                 input_features.append(
                     proto.Model_pb2.FeatureDescription(name=var.name, type=input_feature_type)
                 )
-            elif not self._try_convert_other_input_type(var, input_features):
+            elif types.is_state(var.sym_type):
+                # shape for state input cannot be symbolic
+                shape = var.sym_type.wrapped_type().get_shape()
+                if any_variadic(shape):
+                    raise ValueError("Variable rank model states are not supported!")
+                if any_symbolic(shape):
+                    raise ValueError("Flexible shape model states are not supported!")
+
+                # Core ML only support fp16 for state
+                if not var.dtype == types.fp16:
+                    raise ValueError(
+                        f"State only support fp16 dtype. Got input var {var.name} with dtype {types.builtin_to_string(var.dtype)}."
+                    )
+
+                # create the input feature type
+                array_type = proto.FeatureTypes_pb2.ArrayFeatureType(
+                    shape=shape, dataType=cast_to_framework_io_dtype(var, False)
+                )
+
+                state_feature_type = proto.FeatureTypes_pb2.StateFeatureType()
+                state_feature_type.arrayType.CopyFrom(array_type)
+
+                input_feature_type = proto.FeatureTypes_pb2.FeatureType()
+                input_feature_type.stateType.CopyFrom(state_feature_type)
+
+                # append feature to the input features list
+                input_features.append(
+                    proto.Model_pb2.FeatureDescription(name=var.name, type=input_feature_type)
+                )
+            else:
                 raise NotImplementedError(f"Unsupported input type {var.sym_type}.")
 
             if not is_input_shape_symbolic:
@@ -713,7 +849,6 @@ class CoreMLProtoExporter:
                         'There is "None" dim in TF input placeholder. Please consider specifying '
                         'input shapes by using the "inputs" param in ct.convert().'
                     )
-
         return input_features
 
     def get_func_output(self, func: mil.Function) -> List[proto.Model_pb2.FeatureDescription]:
@@ -807,16 +942,6 @@ class CoreMLProtoExporter:
 
         return output_features
 
-    def create_model_description(
-        self,
-        input_features: List[proto.Model_pb2.FeatureDescription],
-        output_features: List[proto.Model_pb2.FeatureDescription],
-    ) -> proto.Model_pb2.ModelDescription:
-        """
-        Create model description from input and output features
-        """
-        return proto.Model_pb2.ModelDescription(input=input_features, output=output_features)
-
     def get_coreml_model(
         self,
         input: Dict[str, List[proto.Model_pb2.FeatureDescription]],
@@ -825,25 +950,64 @@ class CoreMLProtoExporter:
     ) -> proto.Model_pb2.Model:
         """
         Utils to get a coreml model description.
+        For the multifunction export, we utilize the FunctionDescription proto message.
         """
-        # Model description
-        input_features = input[self._DEFAULT_FUNCTION_NAME]
-        output_features = output[self._DEFAULT_FUNCTION_NAME]
-        desc = self.create_model_description(input_features, output_features)
+        if self.export_multi_functions:
+            # For multifunction export, we use the FunctionDescription
+            if specification_version < _SPECIFICATION_VERSION_IOS_18:
+                raise ValueError(
+                    "minimum_deployment_target for multi-functions export should be iOS18+."
+                )
 
-        if self.classifier_config is not None:
-            desc.predictedFeatureName = self.predicted_feature_name
-            desc.predictedProbabilitiesName = self.predicted_probabilities_name
+            if self.classifier_config is not None:
+                # TODO: This should be fixed in rdar://123660416 ([New Feature][Multi-functions] Enable classifier for multi-functions CoreML model)
+                raise NotImplementedError("classifier model not supported in multi-functions export.")
 
-            # Manually edit output type of predictedFeatureName.
-            # It doesn't use MLMultiArray and really uses a "primitive" type.
-            for output in desc.output:
-                if output.name == self.predicted_feature_name:
-                    if type(self.classifier_config.class_labels[0]) == int:
-                        output.type.int64Type.MergeFromString(b"")
-                    else:
-                        output.type.stringType.MergeFromString(b"")
-                    break
+            function_desc = []
+            for func_name in input.keys():
+                state_features, non_state_input_features = self._decouple_state_and_input(
+                    input[func_name]
+                )
+                desc = proto.Model_pb2.FunctionDescription(
+                    name=func_name,
+                    input=non_state_input_features,
+                    output=output[func_name],
+                    state=state_features,
+                )
+                function_desc.append(desc)
+
+            desc = proto.Model_pb2.ModelDescription(
+                functions=function_desc,
+                defaultFunctionName=self.prog.default_function_name,
+            )
+
+        else:
+            # single function export
+            input_features = input[self.prog.default_function_name]
+            output_features = output[self.prog.default_function_name]
+            state_features, non_state_input_features = self._decouple_state_and_input(
+                input_features
+            )
+
+            desc = proto.Model_pb2.ModelDescription(
+                input=non_state_input_features,
+                output=output_features,
+                state=state_features,
+            )
+
+            if self.classifier_config is not None:
+                desc.predictedFeatureName = self.predicted_feature_name
+                desc.predictedProbabilitiesName = self.predicted_probabilities_name
+
+                # Manually edit output type of predictedFeatureName.
+                # It doesn't use MLMultiArray and really uses a "primitive" type.
+                for output in desc.output:
+                    if output.name == self.predicted_feature_name:
+                        if type(self.classifier_config.class_labels[0]) == int:
+                            output.type.int64Type.MergeFromString(b"")
+                        else:
+                            output.type.stringType.MergeFromString(b"")
+                        break
 
         # Create ML Model
         model = proto.Model_pb2.Model(description=desc, specificationVersion=specification_version)
@@ -871,7 +1035,8 @@ class CoreMLProtoExporter:
         )
 
         # Set optional inputs for main function
-        _set_optional_inputs(model, self.prog.functions["main"].input_types)
+        if "main" in self.prog.functions:
+            _set_optional_inputs(model, self.prog.functions["main"].input_types)
 
         return model
 
@@ -883,8 +1048,8 @@ def load(
     specification_version: Optional[int] = _SPECIFICATION_VERSION_IOS_15,
     **kwargs,
 ) -> proto.Model_pb2.Model:
-    if "main" not in prog.functions:
-        raise ValueError("main function not found in program")
+    if prog.default_function_name not in prog.functions:
+        raise ValueError(f"Default function {prog.default_function_name} not found in program")
 
     # if user has specified "ClassifierConfig", then add the "classify" op to the prog
     classifier_config = kwargs.get("classifier_config", None)
@@ -895,11 +1060,14 @@ def load(
         )
 
     # convert pymil program into mil proto
+    kwargs["prog"] = prog
+    kwargs["weights_dir"] = weights_dir
+    kwargs["specification_version"] = specification_version
+    exporter_kwargs = MILProtoExporter._get_valid_kwargs(kwargs)
     mil_proto_exporter = MILProtoExporter(
-        prog,
-        weights_dir,
+        **exporter_kwargs,
     )
-    mil_proto = mil_proto_exporter.export(specification_version)
+    mil_proto = mil_proto_exporter.export()
 
     # return the model provided by users
     desc = kwargs.get("model_description", None)
@@ -914,7 +1082,6 @@ def load(
         return model
 
     # create a CoreML model protobuf
-    exporter_kwargs = CoreMLProtoExporter.get_additional_kwargs(kwargs)
     coreml_proto_exporter = CoreMLProtoExporter(
         prog,
         mil_proto,
@@ -923,6 +1090,6 @@ def load(
         classifier_config=kwargs.get("classifier_config", None),
         convert_to=kwargs.get("convert_to", None),
         convert_from=kwargs.get("convert_from", None),
-        **exporter_kwargs,
+        export_multi_functions=kwargs.get("export_multi_functions", False),
     )
     return coreml_proto_exporter.export(specification_version)

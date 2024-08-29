@@ -112,12 +112,15 @@ The  [`get_weights_metadata()`](https://apple.github.io/coremltools/source/corem
 
 For example, if you want to compare the weights of a model showing unexpected results with the weights of a model with predictable results, you can use `get_weights_metadata()` to get a list of all the weights with their metadata. Use the `weight_threshold` parameter to set which weights are returned. A weight is included in the resulting dictionary only if its total number of elements are greater than `weight_threshold`. 
 
-The metadata returned by the utility also offers information about the child ops the weight feeds into. The data returned by the API can then be used to customize the optimization of the model via the `ct.optimize.coreml` API -- for details, see [Customizing Ops to Compress](optimizecoreml-api-overview.md#customizing-ops-to-compress).
+The metadata returned by the utility also offers 
+information about the child ops the weight feeds into. 
+The data returned by the API can then be used to customize the 
+optimization of the model via the `ct.optimize.coreml` API. 
 
 
 ### Using the Metadata 
 
-The  [`get_weights_metadata()`](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.post_training_quantization.html#coremltools.optimize.coreml.get_weights_metadata) utility returns the weights metadata as an ordered dictionary that maps to strings in [CoreMLWeightMetaData](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.post_training_quantization.html#coremltools.optimize.coreml.CoreMLWeightMetaData) and preserves the sequential order of the weights. The results are useful when constructing [`cto.OptimizationConfig`](https://apple.github.io/coremltools/docs-guides/source/optimizecoreml-api-overview.html#customizing-ops-to-compress).
+The  [`get_weights_metadata()`](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.post_training_quantization.html#coremltools.optimize.coreml.get_weights_metadata) utility returns the weights metadata as an ordered dictionary that maps to strings in [CoreMLWeightMetaData](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.post_training_quantization.html#coremltools.optimize.coreml.CoreMLWeightMetaData) and preserves the sequential order of the weights. The results are useful when constructing [`cto.coreml.OptimizationConfig`](https://apple.github.io/coremltools/docs-guides/source/optimizecoreml-api-overview.html#customizing-ops-to-compress).
 
 For example, with the [OptimizationConfig](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.config.html#coremltools.optimize.coreml.OptimizationConfig) class you have fine-grain control over applying different optimization configurations to different weights by directly setting `op_type_configs` and `op_name_configs` or using [`set_op_name`](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.config.html#coremltools.optimize.coreml.OptimizationConfig.set_op_name) and [`set_op_type`](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.config.html#coremltools.optimize.coreml.OptimizationConfig.set_op_type). When using [`set_op_name`](https://apple.github.io/coremltools/source/coremltools.optimize.coreml.config.html#coremltools.optimize.coreml.OptimizationConfig.set_op_name), you need to know the name for the `const` op that produces the weight. The  `get_weights_metadata()` utility provides the weight name and the corresponding weight numpy data, along with metadata information. 
 
@@ -129,7 +132,7 @@ The following code loads the `SegmentationModel_with_metadata.mlpackage` saved i
 The example also shows how to get the name of the last weight in the model. The code palettizes all ops except the last weight, which is a common practical scenario when the last layer is more sensitive and should be skipped from quantization:
 
 ```python
-import coremltools.optimize.coreml as cto
+import coremltools.optimize as cto
 
 from coremltools.models import MLModel
 from coremltools.optimize.coreml import get_weights_metadata
@@ -161,11 +164,48 @@ for weight_name, weight_metadata in weight_metadata_dict.items():
 
 # Palettize all weights except for the last weight
 last_weight_name = list(weight_metadata_dict.keys())[-1]
-global_config = cto.OpPalettizerConfig(nbits=6, mode="kmeans")
-config = cto.OptimizationConfig(
+global_config = cto.coreml.OpPalettizerConfig(nbits=6, mode="kmeans")
+config = cto.coreml.OptimizationConfig(
     global_config=global_config,
     op_name_configs={last_weight_name: None},
 )
-compressed_mlmodel = cto.palettize_weights(mlmodel, config)
+compressed_mlmodel = cto.coreml.palettize_weights(mlmodel, config)
 
+```
+
+## Bisect Model
+
+In certain scenarios, you may want to break a large Core ML model into two smaller models. For instance, if you are deploying a model to run on neural engine on an iPhone, it cannot be larger than 1 GB. If you are working with, say, [Stable Diffusion](https://github.com/apple/ml-stable-diffusion) 1.5 model which is 1.72 GB large (Float 16 precision), then it needs to be broken up into two chunks, each less than 1 GB. The utility `ct.models.utils.bisect_model` will allow you to do exactly that. When using this API, you can also opt-in to package the two chunks of the model into a pipeline model, so that its still a single mlpackage file, with the two models arranged in a sequential manner.
+
+The example below shows how to bisect a model, test the accuracy, and save them on disk.
+
+```python
+
+import coremltools as ct
+
+model_path = "my_model.mlpackage"
+output_dir = "./output/"
+
+# The following code will produce two smaller models:
+# `./output/my_model_chunk1.mlpackage` and `./output/my_model_chunk2.mlpackage`
+# It also compares the output numerical of the original Core ML model with the chunked models.
+ct.models.utils.bisect_model(
+    model_path,
+    output_dir,
+)
+
+# The following code will produce a single pipeline model `./output/my_model_chunked_pipeline.mlpackage`
+ct.models.utils.bisect_model(
+    model_path,
+    output_dir,
+    merge_chunks_to_pipeline=True,
+)
+
+# You can also pass the MLModel object directly
+mlmodel = ct.models.MLModel(model_path)
+ct.models.utils.bisect_model(
+    mlmodel,
+    output_dir,
+    merge_chunks_to_pipeline=True,
+)
 ```

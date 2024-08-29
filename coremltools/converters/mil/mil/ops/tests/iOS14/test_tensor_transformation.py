@@ -413,6 +413,11 @@ class TestReshape:
         ),
     )
     def test_builder_to_backend_symbolic(self, compute_unit, backend):
+        if backend.backend == "mlprogram":
+            pytest.xfail(
+                "rdar://131637870 Why It Randomly Segfaults on CI but Cannot Reproduce Locally "
+            )
+
         s0 = get_new_symbol()
         s_len = get_new_symbol()
 
@@ -1058,7 +1063,7 @@ class TestSliceByIndex:
             )
             return x
 
-        x = np.random.rand(*INPUT_SHAPE)
+        x = np.float16(np.random.rand(*INPUT_SHAPE))
 
         # slice by index is x[begin[0]: end[0]: stride[0], begin[1]: end[1]: stride[1], ...]
         y_numpy = x[0:1:1, 0:2:1, 0:8:2, 0:12:2]

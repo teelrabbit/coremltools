@@ -1,9 +1,8 @@
-#  Copyright (c) 2023, Apple Inc. All rights reserved.
+#  Copyright (c) 2024, Apple Inc. All rights reserved.
 #
 #  Use of this source code is governed by a BSD-3-clause license that can be
 #  found in the LICENSE.txt file or at https://opensource.org/licenses/BSD-3-Clause
 
-import copy as _copy
 import logging as _logging
 from typing import Dict as _Dict
 from typing import Optional as _Optional
@@ -14,9 +13,15 @@ from torch.ao.quantization import FakeQuantize as _FakeQuantize
 
 from coremltools.optimize.torch._typing import ParamsDict as _ParamsDict
 from coremltools.optimize.torch._utils.math_utils import rmse_error as _rmse_error
+from coremltools.optimize.torch._utils.metadata_utils import (
+    register_metadata_version as _register_metadata_version,
+)
 from coremltools.optimize.torch._utils.torch_utils import get_eval_model as _get_eval_model
+from coremltools.optimize.torch._utils.validation_utils import (
+    validate_param_config as _validate_param_config,
+)
 from coremltools.optimize.torch.base_model_optimizer import (
-    BaseModelOptimizer as _BaseModelOptimizer,
+    BaseTrainingTimeModelOptimizer as _BaseTrainingTimeModelOptimizer,
 )
 from coremltools.optimize.torch.base_model_optimizer import _Report
 from coremltools.optimize.torch.palettization._custom_conversion import (
@@ -24,6 +29,9 @@ from coremltools.optimize.torch.palettization._custom_conversion import (
 )
 from coremltools.optimize.torch.palettization._supported_modules import (
     _get_palettization_qat_mappings,
+)
+from coremltools.optimize.torch.palettization._supported_modules import (
+    get_palettizable_parameters as _get_palettizable_parameters,
 )
 from coremltools.optimize.torch.palettization.fake_palettize import FakePalettize as _FakePalettize
 from coremltools.optimize.torch.palettization.palettization_config import (
@@ -42,7 +50,7 @@ from coremltools.optimize.torch.palettization.palettization_config import (
 _logger = _logging.getLogger(__name__)
 
 
-class Palettizer(_BaseModelOptimizer):
+class Palettizer(_BaseTrainingTimeModelOptimizer):
     pass
 
 
@@ -108,7 +116,10 @@ class DKMPalettizer(Palettizer):
                 if config is not None:
                     submod_configs = config if isinstance(config, list) else [config]
                     for submod_config in submod_configs:
-                        if submodule.weight.numel() > submod_config.weight_threshold:
+                        if all(
+                            param.numel() > submod_config.weight_threshold
+                            for param, _ in _get_palettizable_parameters(submodule)
+                        ):
                             module_level_advanced_options = self._get_module_level_advanced_options(
                                 submodule, submod_config
                             )
@@ -122,27 +133,56 @@ class DKMPalettizer(Palettizer):
                                 if submod_config.cluster_dim is not None
                                 else _DEFAULT_PALETTIZATION_SCHEME[type(submodule)]["cluster_dim"]
                             )
+                            enable_per_channel_scale = (
+                                submod_config.enable_per_channel_scale
+                                if submod_config.enable_per_channel_scale is not None
+                                else _DEFAULT_PALETTIZATION_SCHEME[type(submodule)][
+                                    "enable_per_channel_scale"
+                                ]
+                            )
+                            updated_config = None
+                            for param, param_name in _get_palettizable_parameters(submodule):
+                                updated_config = _validate_param_config(
+                                    name + "." + param_name,
+                                    param,
+                                    submodule,
+                                    submod_config,
+                                    [
+                                        "palettization_cluster_dim",
+                                        "palettization_group_size",
+                                    ],
+                                    module_level_advanced_options,
+                                )
+                                if not updated_config:
+                                    break
+                            if not updated_config:
+                                continue
+
                             self._palettize_module(
                                 submodule,
                                 n_bits,
                                 cluster_dim,
-                                submod_config.quant_min,
-                                submod_config.quant_max,
-                                submod_config.cluster_dtype,
-                                submod_config.dtype,
-                                submod_config.quantize_activations,
+                                enable_per_channel_scale,
+                                updated_config.group_size,
+                                updated_config.quant_min,
+                                updated_config.quant_max,
+                                updated_config.lut_dtype,
+                                updated_config.dtype,
+                                updated_config.quantize_activations,
                                 module_level_advanced_options,
                             )
-                            self._milestones[name] = submod_config.milestone
+                            self._milestones[name] = updated_config.milestone
 
     @staticmethod
     def _palettize_module(
         module: _nn.Module,
         n_bits: int,
         cluster_dim: int,
+        enable_per_channel_scale: bool,
+        group_size: _Optional[int],
         quant_min: int,
         quant_max: int,
-        cluster_dtype: str,
+        lut_dtype: str,
         dtype: _torch.dtype,
         quantize_activations: bool,
         advanced_options: _Dict,
@@ -157,15 +197,17 @@ class DKMPalettizer(Palettizer):
             ),
             n_bits=n_bits,
             cluster_dim=cluster_dim,
+            enable_per_channel_scale=enable_per_channel_scale,
+            group_size=group_size,
             quant_min=quant_min,
             quant_max=quant_max,
-            cluster_dtype=cluster_dtype,
+            lut_dtype=lut_dtype,
             advanced_options=advanced_options,
         )
         if quantize_activations:
             fq_activation = _FakeQuantize.with_args(
                 observer=_torch.quantization.MovingAveragePerChannelMinMaxObserver.with_args(
-                    quant_min=quant_min, quant_max=quant_max
+                    quant_min=quant_min, quant_max=quant_max, dtype=dtype
                 ),
                 quant_min=quant_min,
                 quant_max=quant_max,
@@ -184,7 +226,7 @@ class DKMPalettizer(Palettizer):
         """
         module_level_advanced_options = {}
         for key in _DEFAULT_PALETTIZATION_ADVANCED_OPTIONS.keys():
-            if key == "cluster_permute" and module_level_config.cluster_dtype == "oc_last":
+            if key == "cluster_permute" and module_level_config.lut_dtype == "oc_last":
                 cluster_permute = list(range(module.weight.dim()))
                 cluster_permute = cluster_permute[1:] + cluster_permute[:1]
                 module_level_advanced_options[key] = cluster_permute
@@ -201,9 +243,7 @@ class DKMPalettizer(Palettizer):
             inplace (:obj:`bool`): If ``True``, model transformations are carried out in-place and
                 the original module is mutated, otherwise a copy of the model is mutated and returned.
         """
-        if not inplace:
-            self._model = _copy.deepcopy(self._model)
-
+        self._model = self._get_model_for_compression(inplace)
         self._model.train()
         self._palettize_supported_modules()
         qat_mappings = _get_palettization_qat_mappings()
@@ -228,12 +268,14 @@ class DKMPalettizer(Palettizer):
         if model is None:
             model = self._model
         model.eval()
+
         finalized_model = _torch.quantization.convert(
             model, convert_custom_config_dict=_PALETTIZATION_CONVERT_DICT, inplace=inplace
         )
 
         if model is None:
             self._model = finalized_model
+        _register_metadata_version(finalized_model)
         return finalized_model
 
     def step(self):
@@ -291,10 +333,11 @@ class DKMPalettizer(Palettizer):
 
     @staticmethod
     def _enable_fake_palett_impl(module: _torch.nn.Module, flag: bool):
-        if hasattr(module, "weight_fake_quant") and isinstance(
-            module.weight_fake_quant, _FakePalettize
-        ):
-            module.weight_fake_quant.enable_fake_palett(flag)
+        def enable_fn(mod):
+            if hasattr(mod, "enable_fake_palett"):
+                mod.enable_fake_palett(flag)
+
+        module.apply(enable_fn)
 
     def report(self) -> _Report:
         """
@@ -311,16 +354,16 @@ class DKMPalettizer(Palettizer):
                     if hasattr(module, "weight_fake_quant"):
                         module_summary["device"] = module.weight.device
                         qweight = module.weight_fake_quant.forward(module.weight.detach())
-                        cluster_dtype = module.weight_fake_quant.cluster_dtype
+                        lut_dtype = module.weight_fake_quant.lut_dtype
                         cluster_permute = module.weight_fake_quant.cluster_permute
                         module_summary["error"] = _rmse_error(
                             module.weight.detach(), qweight
                         ).item()
-                        n_clusters = module.weight_fake_quant.n_clusters[0]
+                        n_clusters = module.weight_fake_quant.n_clusters
                         module_summary["#params"] = int(_torch.numel(qweight))
                         cluster_dim = module.weight_fake_quant.cluster_dim
                         module_summary["#dtype"] = (
-                            f":num_clusters: {n_clusters} <{cluster_dtype, cluster_permute}> "
+                            f":num_clusters: {n_clusters} <{lut_dtype, cluster_permute}> "
                             f"dim={cluster_dim}"
                         )
                         report[name] = module_summary

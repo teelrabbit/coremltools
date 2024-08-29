@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from coremltools import _logger as logger
 from coremltools.converters._profile_utils import _profile
-from coremltools.converters.mil import Program
+from coremltools.converters.mil.mil import Program
 from coremltools.converters.mil.mil.passes.graph_pass import PassOption
 from coremltools.converters.mil.mil.passes.helper import classproperty as _classproperty
 from coremltools.converters.mil.mil.passes.pass_registry import PASS_REGISTRY
@@ -60,6 +60,7 @@ _COMMON_PASSES: List[Text] = [
     "common::replace_stack_reshape",
     # should come before detect_concat_interleave since it may add concat
     "common::reduce_transposes",
+    "common::fuse_dilated_conv",
     "common::fuse_conv_scale",
     "common::fuse_conv_bias",
     "common::fuse_onehot_matmul_to_gather",
@@ -95,6 +96,14 @@ _COMMON_PASSES: List[Text] = [
     "common::add_fp16_cast",  # Will be removed if compute precision is not FP16.
     "common::add_int16_cast",  # Will be removed if compute precision is not FP16.
     "common::update_output_dtypes",  # Must run again after `add_fp16_cast` and `add_int16_cast`.
+    "common::const_elimination",
+    "common::dead_code_elimination",
+    "common::cast_optimization",
+    "common::dead_code_elimination",  # must follow cast_optimization
+    "common::const_elimination",
+    # After all fusions have settled, start inserting state ops
+    "common::canonicalize_inplace_pattern",  # always start with canonicalizations
+    "common::prefer_state_in_downstream",
     "common::const_elimination",
     "common::dead_code_elimination",  # always end with dce
 ]
@@ -382,7 +391,11 @@ class PassPipeline:
                 f"There is no pipeline for `{pipeline_name}`. "
                 f"Available pipelines: {cls._PIPELINE_NAME_TO_PASSES.keys()}"
             )
-        return PassPipeline(cls._PIPELINE_NAME_TO_PASSES[pipeline_name], pipeline_name)
+        # We need to copy the pass names when initialize a PassPipeline object,
+        # to prevent the member functions of PassPipeline from potentially modifying the original
+        # data in _PIPELINE_NAME_TO_PASSES.
+        passes = list(cls._PIPELINE_NAME_TO_PASSES[pipeline_name])
+        return PassPipeline(passes, pipeline_name)
 
     @classmethod
     def list_available_pipelines(cls) -> List[str]:

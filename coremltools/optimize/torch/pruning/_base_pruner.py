@@ -1,4 +1,4 @@
-#  Copyright (c) 2023, Apple Inc. All rights reserved.
+#  Copyright (c) 2024, Apple Inc. All rights reserved.
 #
 #  Use of this source code is governed by a BSD-3-clause license that can be
 #  found in the LICENSE.txt file or at https://opensource.org/licenses/BSD-3-Clause
@@ -10,20 +10,22 @@ from typing import Tuple as _Tuple
 
 import torch as _torch
 
+from coremltools.optimize.torch._utils.metadata_utils import (
+    register_metadata_version as _register_metadata_version,
+)
 from coremltools.optimize.torch._utils.torch_utils import get_eval_model as _get_eval_model
 from coremltools.optimize.torch.base_model_optimizer import (
-    BaseModelOptimizer as _BaseModelOptimizer,
+    BaseTrainingTimeModelOptimizer as _BaseTrainingTimeModelOptimizer,
 )
 from coremltools.optimize.torch.base_model_optimizer import _Report
 from coremltools.optimize.torch.optimization_config import OptimizationConfig as _OptimizationConfig
-from coremltools.optimize.torch.pruning._utils import (
-    get_global_sparsity_summaries as _get_global_sparsity_summaries,
-)
+from coremltools.optimize.torch.pruning import _utils
+from coremltools.optimize.torch.pruning._base_pruning_method import BaseDynamicPruningMethod
 
 _logger = _logging.getLogger(__name__)
 
 
-class BasePruner(_BaseModelOptimizer):
+class BasePruner(_BaseTrainingTimeModelOptimizer):
     pass
 
 
@@ -51,7 +53,7 @@ class BasePrunerWithPruningMethod(BasePruner):
             inplace (:obj:`bool`): If ``True``, model transformations are carried out in-place and
                 the original module is mutated, otherwise a copy of the model is mutated and returned.
         """
-        return _copy.deepcopy(self._model) if not inplace else self._model
+        return self._get_model_for_compression(inplace=inplace)
 
     def step(self):
         """
@@ -76,9 +78,26 @@ class BasePrunerWithPruningMethod(BasePruner):
         if model is None:
             model = self._model
         finalized_model = model if inplace else _copy.deepcopy(model)
-        for _, submodule in finalized_model.named_modules(remove_duplicate=True):
+
+        # Add compression metadata
+        _register_metadata_version(finalized_model)
+        for name, pruner_info in self._pruner_info.items():
+            submodule = finalized_model.get_submodule(name)
+            _utils.register_compression_metadata(submodule, pruner_info, self._supported_modules)
+
+        # Remove pruning hooks
+        for name, submodule in finalized_model.named_modules(remove_duplicate=True):
             if hasattr(submodule, "pruning_method"):
                 submodule.pruning_method.remove(submodule)
+            # If the module has been joint pruned + palettized, then palettizer finalize()
+            # can remove pruning_method attribute but not the forward pre hook. So we explicitly remove it.
+            elif name in self._pruner_info and _utils.is_palettized_module(
+                self._pruner_info[name].module
+            ):
+                for k, hook in submodule._forward_pre_hooks.items():
+                    if isinstance(hook, BaseDynamicPruningMethod):
+                        del submodule._forward_pre_hooks[k]
+
         if model is None:
             self._model = finalized_model
         return finalized_model
@@ -114,7 +133,7 @@ class BasePrunerWithPruningMethod(BasePruner):
                     ]
                     global_summaries[
                         f"{sparsity_type}_weight_sparsity"
-                    ] = _get_global_sparsity_summaries(layer_sparsities, layer_numel)
+                    ] = _utils.get_global_sparsity_summaries(layer_sparsities, layer_numel)
                 report["global"] = global_summaries
         return report
 

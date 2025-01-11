@@ -8,14 +8,16 @@ from typing import Tuple
 
 import pytest
 
-from coremltools._deps import _HAS_EXECUTORCH, _HAS_TORCH_EXPORT_API
+from ..utils import TorchFrontend
+from .testing_utils import frontends as _frontends
 
-if not _HAS_TORCH_EXPORT_API:
-    pytest.skip(allow_module_level=True, reason="torch.export is required")
+frontends = _frontends.copy()
 
-USE_EDGE_DIALECT = [False]
-if _HAS_EXECUTORCH:
-    USE_EDGE_DIALECT.append(True)
+if TorchFrontend.TORCHSCRIPT in frontends:
+    frontends.remove(TorchFrontend.TORCHSCRIPT)
+
+if len(frontends) == 0:
+    pytest.skip(allow_module_level=True)
 
 import torch
 
@@ -42,7 +44,7 @@ from coremltools.optimize.torch.quantization.quantization_config import (
     QuantizationScheme,
 )
 
-from .testing_utils import TorchBaseTest, TorchFrontend
+from .testing_utils import TorchBaseTest
 
 
 class TestTorchExportQuantization(TorchBaseTest):
@@ -108,18 +110,16 @@ class TestTorchExportQuantization(TorchBaseTest):
         return converted_graph
 
     @pytest.mark.parametrize(
-        "quantizer_name, quantization_type, is_per_channel, nbit, use_edge_dialect",
+        "quantizer_name, quantization_type, is_per_channel, nbit, frontend",
         itertools.product(
             ("XNNPack", "CoreML"),
             ("PTQ", "QAT"),
             (True, False),
             (4, 8),
-            USE_EDGE_DIALECT,
+            frontends,
         ),
     )
-    def test_conv_relu(
-        self, quantizer_name, quantization_type, is_per_channel, nbit, use_edge_dialect
-    ):
+    def test_conv_relu(self, quantizer_name, quantization_type, is_per_channel, nbit, frontend):
         SHAPE = (1, 3, 256, 256)
 
         class Model(torch.nn.Module):
@@ -152,8 +152,7 @@ class TestTorchExportQuantization(TorchBaseTest):
         _, mlmodel, _, _, _, _ = self.run_compare_torch(
             SHAPE,
             converted_graph,
-            frontend=TorchFrontend.EXIR,
-            use_edge_dialect=use_edge_dialect,
+            frontend=frontend,
             backend=("mlprogram", "fp16"),
             minimum_deployment_target=minimum_deployment_target,
         )
@@ -173,18 +172,16 @@ class TestTorchExportQuantization(TorchBaseTest):
             assert constexpr_affine_dequantize_op.quantized_data.dtype in (types.int8, types.uint8)
 
     @pytest.mark.parametrize(
-        "quantizer_name, quantization_type, is_per_channel, nbit, use_edge_dialect",
+        "quantizer_name, quantization_type, is_per_channel, nbit, frontend",
         itertools.product(
             ("XNNPack", "CoreML"),
             ("PTQ", "QAT"),
             (True, False),
             (4, 8),
-            USE_EDGE_DIALECT,
+            frontends,
         ),
     )
-    def test_linear(
-        self, quantizer_name, quantization_type, is_per_channel, nbit, use_edge_dialect
-    ):
+    def test_linear(self, quantizer_name, quantization_type, is_per_channel, nbit, frontend):
         SHAPE = (1, 5)
 
         class Model(torch.nn.Module):
@@ -213,8 +210,7 @@ class TestTorchExportQuantization(TorchBaseTest):
         _, mlmodel, _, _, _, _ = self.run_compare_torch(
             SHAPE,
             converted_graph,
-            frontend=TorchFrontend.EXIR,
-            use_edge_dialect=use_edge_dialect,
+            frontend=frontend,
             backend=("mlprogram", "fp16"),
             minimum_deployment_target=minimum_deployment_target,
         )

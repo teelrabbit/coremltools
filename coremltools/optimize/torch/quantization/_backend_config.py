@@ -29,7 +29,7 @@ from coremltools.optimize.torch.quantization._backend_config_utils import (
     activation_configs as _activation_configs,
 )
 from coremltools.optimize.torch.quantization._backend_config_utils import (
-    binary_op_act_configs as _binary_op_relu_configs,
+    binary_op_act_configs as _binary_op_act_configs,
 )
 from coremltools.optimize.torch.quantization._backend_config_utils import (
     binary_op_configs as _binary_op_configs,
@@ -103,6 +103,7 @@ _func_activations = (
     _F.hardtanh_,
     _F.log_softmax,
     _F.hardswish,
+    _torch.exp2,
 )
 
 # ReLU activations
@@ -724,7 +725,7 @@ def _add_act() -> _List[_BackendPatternConfig]:
     FakeQuant ->
     """
     acts = _mod_activations + _func_activations + (_nn.ReLU, _F.relu, _torch.relu)
-    return _binary_op_relu_configs(ops=[_operator.add, _torch.add], acts=list(acts))
+    return _binary_op_act_configs(ops=[_operator.add, _torch.add], acts=list(acts))
 
 
 @_BackendConfigRegistry.register()
@@ -741,7 +742,7 @@ def _mul_act() -> _List[_BackendPatternConfig]:
     FakeQuant ->
     """
     acts = _mod_activations + _func_activations + (_nn.ReLU, _F.relu, _torch.relu)
-    return _binary_op_relu_configs(ops=[_operator.mul, _torch.mul], acts=list(acts))
+    return _binary_op_act_configs(ops=[_operator.mul, _torch.mul], acts=list(acts))
 
 
 @_BackendConfigRegistry.register()
@@ -758,7 +759,40 @@ def _matmul_act() -> _List[_BackendPatternConfig]:
     FakeQuant ->
     """
     acts = _mod_activations + _func_activations + (_nn.ReLU, _F.relu, _torch.relu)
-    return _binary_op_relu_configs(ops=[_torch.matmul], acts=list(acts))
+    return _binary_op_act_configs(ops=[_torch.matmul], acts=list(acts))
+
+
+@_BackendConfigRegistry.register()
+def _einsum_act() -> _List[_BackendPatternConfig]:
+    """
+    float:
+    input_1 ->
+                einsum -> Act -> output
+    input_2 ->
+
+    qat:
+    FakeQuant ->
+                 einsum -> Act -> FakeQuant
+    FakeQuant ->
+    """
+    acts = _mod_activations + _func_activations + (_nn.ReLU, _F.relu, _torch.relu)
+    return _binary_op_act_configs(ops=[_torch.einsum], acts=list(acts))
+
+
+@_BackendConfigRegistry.register()
+def _sub() -> _List[_BackendPatternConfig]:
+    """
+    float:
+    input_1 ->
+                sub -> output
+    input_2 ->
+
+    qat:
+    FakeQuant ->
+                 sub -> FakeQuant
+    FakeQuant ->
+    """
+    return _binary_op_configs(ops=[_operator.sub, _torch.sub])
 
 
 @_BackendConfigRegistry.register()
@@ -808,6 +842,21 @@ def _matmul() -> _List[_BackendPatternConfig]:
     """
     return _binary_op_configs(ops=[_torch.matmul])
 
+
+@_BackendConfigRegistry.register()
+def _einsum() -> _List[_BackendPatternConfig]:
+    """
+    float:
+    input_1 ->
+                einsum -> output
+    input_2 ->
+
+    qat:
+    FakeQuant ->
+                 einsum -> FakeQuant
+    FakeQuant ->
+    """
+    return _binary_op_configs(ops=[_torch.einsum])
 
 @_BackendConfigRegistry.register()
 def _cat() -> _List[_BackendPatternConfig]:

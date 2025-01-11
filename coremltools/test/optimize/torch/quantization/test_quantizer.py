@@ -368,8 +368,6 @@ def test_preserved_attributes(model_dict):
     )
 
 
-@pytest.mark.optional
-@pytest.mark.parametrize("algorithm", ["vanilla", "learnable"])
 @pytest.mark.parametrize("weight_dtype", ["qint8", "quint8", "qint4", "quint4"])
 @pytest.mark.parametrize("weight_per_channel", [True, False])
 @pytest.mark.parametrize(
@@ -377,13 +375,11 @@ def test_preserved_attributes(model_dict):
 )
 def test_linear_quantizer_report(
     mnist_model_conv_transpose,
-    algorithm,
     weight_dtype,
     weight_per_channel,
     quantization_scheme,
 ):
     print("\nTESTING REPORT WITH")
-    print("ALGORITHM", algorithm)
     print("WEIGHT_DTYPE", weight_dtype)
     print("WEIGHT_PER_CHANNEL", weight_per_channel)
     print("QUANTIZATION_SCHEME", quantization_scheme)
@@ -392,7 +388,6 @@ def test_linear_quantizer_report(
         {
             "global_config": {
                 "milestones": [0, 1, 1, 3],
-                "algorithm": algorithm,
                 "weight_dtype": weight_dtype,
                 "weight_per_channel": weight_per_channel,
                 "quantization_scheme": quantization_scheme,
@@ -401,7 +396,6 @@ def test_linear_quantizer_report(
                 "dense2": {
                     "milestones": [0, 1, 1, 3],
                     "activation_dtype": torch.float32,
-                    "algorithm": algorithm,
                     "weight_dtype": weight_dtype,
                     "weight_per_channel": weight_per_channel,
                     "quantization_scheme": quantization_scheme,
@@ -418,7 +412,13 @@ def test_linear_quantizer_report(
     print("\nREPORT\n" + str(report))
 
 
-@pytest.mark.parametrize("dtype", ["qint4", "qint8"])
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param("qint4", marks=pytest.mark.xfail(reason="rdar://134169158")),
+        "qint8",
+    ],
+)
 @pytest.mark.parametrize("scheme", ["symmetric", "affine"])
 @pytest.mark.parametrize("conv_transpose", [False, True])
 def test_compression_metadata(dtype, scheme, conv_transpose):
@@ -432,6 +432,7 @@ def test_compression_metadata(dtype, scheme, conv_transpose):
                     "conv1",
                     (nn.Conv2d(1, 20, 3) if not conv_transpose else nn.ConvTranspose2d(1, 20, 3)),
                 ),
+                ("relu", nn.ReLU()),
                 ("fc1", nn.Linear(20, 100)),
             ]
         )
@@ -444,7 +445,7 @@ def test_compression_metadata(dtype, scheme, conv_transpose):
                     "quantization_scheme": scheme,
                 },
                 "fc1": None,
-            }
+            },
         }
     )
     quantizer = LinearQuantizer(model, config)
@@ -457,7 +458,7 @@ def test_compression_metadata(dtype, scheme, conv_transpose):
     assert "_COREML_/metadata_version" in model.state_dict()
 
     # Verify compression metadata is added for conv1
-    metadata_dict = CompressionMetadata.from_state_dict(model.conv1.state_dict())
+    metadata_dict = CompressionMetadata.from_state_dict(model.conv1[0].state_dict())
     assert len(metadata_dict) == 1
     assert "weight" in metadata_dict
 
@@ -470,6 +471,26 @@ def test_compression_metadata(dtype, scheme, conv_transpose):
     if scheme == "symmetric":
         assert torch.all(metadata.zero_point == 0)
 
-    # # Verify no compression metadata is added for fc1
+    # Verify no compression metadata is added for fc1
     metadata_dict = CompressionMetadata.from_state_dict(model.fc1.state_dict())
     assert len(metadata_dict) == 0
+
+
+@pytest.mark.parametrize(
+    "dtype,n_bits",
+    [
+        ["qint4", 4],
+        ["quint4", 4],
+        ["qint8", 8],
+        ["quint8", 8],
+        [torch.qint8, 8],
+        [torch.quint8, 8],
+    ],
+)
+def test_linear_quantizer_config_n_bits(dtype, n_bits):
+    config = ModuleLinearQuantizerConfig.from_dict(
+        {
+            "weight_dtype": dtype,
+        }
+    )
+    assert config.weight_n_bits == n_bits

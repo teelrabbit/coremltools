@@ -102,12 +102,22 @@ _default_quantization_options = {
 
 # Backends only support 4 and 8 bit quantization
 _SUPPORTED_N_BITS = [4, 8, 32]
+_SUPPORTED_WEIGHT_DTYPE = [
+    "qint4",
+    "quint4",
+    "qint8",
+    "quint8",
+    "float32",
+    _torch.qint8,
+    _torch.quint8,
+    _torch.float32,
+]
 
 
 @_define
 class ModuleLinearQuantizerConfig(_ModuleOptimizationConfig):
     """
-    Configuration class for specifying global and module level quantization options for linear quantization
+    Configuration class for specifying global and module-level quantization options for linear quantization
     algorithm implemented in :py:class:`LinearQuantizer`.
 
     Linear quantization algorithm simulates the effects of quantization during training, by quantizing
@@ -236,12 +246,12 @@ class ModuleLinearQuantizerConfig(_ModuleOptimizationConfig):
     )
 
     def __attrs_post_init__(self):
+        if self.weight_dtype not in _SUPPORTED_WEIGHT_DTYPE:
+            raise ValueError(
+                f"weight_dtype must be one of {_SUPPORTED_WEIGHT_DTYPE} not {self.weight_dtype}"
+            )
         self.weight_n_bits = _get_n_bits_from_dtype(self.weight_dtype)
         self.weight_dtype = _maybe_convert_str_to_dtype(self.weight_dtype)
-        if self.weight_dtype not in [_torch.qint8, _torch.quint8, _torch.float32]:
-            raise ValueError(
-                f"weight_dtype must be one of (_torch.qint8, _torch.quint8, _torch.float32) not {self.weight_dtype}"
-            )
 
     @milestones.validator
     def _check_milestones(self, attribute, value):
@@ -332,7 +342,7 @@ class LinearQuantizerConfig(_OptimizationConfig):
             module class, such as :py:class:`torch.nn.Linear`. The keys can be either strings
             or module classes.
         module_name_configs (:obj:`dict` of :obj:`str` to :py:class:`ModuleLinearQuantizerConfig`):
-            Module level configs applied to specific modules.
+            Module-level configs applied to specific modules.
             The name of the module must be a fully qualified name that can be used to fetch it
             from the top level module using the ``module.get_submodule(target)`` method.
         non_traceable_module_names (:obj:`list` of :obj:`str`):

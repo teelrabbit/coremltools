@@ -45,6 +45,8 @@ EXPECTED_MODULES = [
     "libmilstoragepython",
     "optimize",
     "StateType",
+    "ReshapeFrequency",
+    "SpecializationStrategy",
 ]
 
 
@@ -73,6 +75,7 @@ class TestApiVisibilities:
             "MultiFunctionDescriptor",
             "randomize_weights",
             "bisect_model",
+            "change_input_output_tensor_type",
         ]
         _check_visible_modules(_get_visible_items(ct.utils), expected)
 
@@ -90,6 +93,8 @@ class TestApiVisibilities:
             "pipeline",
             "tree_ensemble",
             "utils",
+            "compute_plan",
+            "compute_device",
         ]
         _check_visible_modules(_get_visible_items(ct.models), expected)
 
@@ -108,6 +113,7 @@ class TestApiVisibilities:
             "version",
             "weights_dir",
             "make_state",
+            "get_available_compute_devices",
         ]
         _check_visible_modules(_get_visible_items(ct.models.MLModel), expected)
 
@@ -265,4 +271,73 @@ class TestApiVisibilities:
     def test_models_neural_network_optimization_utils(self):
         _check_visible_modules(
             _get_visible_items(ct.models.neural_network.optimization_utils), [],
+        )
+
+    def test_models_computeplan(self):
+        expected = [
+            "MLComputePlan",
+            "MLComputePlanCost",
+            "MLComputePlanDeviceUsage",
+            "MLModelStructure",
+            "MLModelStructureNeuralNetwork",
+            "MLModelStructureNeuralNetworkLayer",
+            "MLModelStructureProgramValue",
+            "MLModelStructureProgramBinding",
+            "MLModelStructureProgramArgument",
+            "MLModelStructureProgramValueType",
+            "MLModelStructureProgramNamedValueType",
+            "MLModelStructureProgramOperation",
+            "MLModelStructureProgramBlock",
+            "MLModelStructureProgramFunction",
+            "MLModelStructureProgram",
+            "MLModelStructurePipeline",
+            "MLModelStructure",
+            "MLComputePlanDeviceUsage",
+            "MLComputePlanCost",
+            "MLComputePlan",
+        ]
+        _check_visible_modules(_get_visible_items(ct.models.compute_plan), expected)
+
+    def test_models_mlcomputeplan(self):
+        expected = [
+            "model_structure",
+            "get_compute_device_usage_for_mlprogram_operation",
+            "get_compute_device_usage_for_neuralnetwork_layer",
+            "get_estimated_cost_for_mlprogram_operation",
+            "load_from_path",
+        ]
+        _check_visible_modules(_get_visible_items(ct.models.compute_plan.MLComputePlan), expected)
+
+    def test_models_mlmodelstructure(self):
+        expected = [
+            "load_from_path",
+        ]
+        _check_visible_modules(
+            _get_visible_items(ct.models.compute_plan.MLModelStructure), expected
+        )
+
+    def test_models_computedevice(self):
+        expected = [
+            "MLComputeDevice",
+            "MLCPUComputeDevice",
+            "MLGPUComputeDevice",
+            "MLNeuralEngineComputeDevice",
+        ]
+        _check_visible_modules(_get_visible_items(ct.models.compute_device), expected)
+
+    def test_models_mlcomputedevice(self):
+        expected = [
+            "get_all_compute_devices",
+        ]
+        _check_visible_modules(
+            _get_visible_items(ct.models.compute_device.MLComputeDevice), expected
+        )
+
+    def test_models_mlneuralenginecomputedevice(self):
+        expected = [
+            "get_all_compute_devices",
+            "total_core_count",
+        ]
+        _check_visible_modules(
+            _get_visible_items(ct.models.compute_device.MLNeuralEngineComputeDevice), expected
         )

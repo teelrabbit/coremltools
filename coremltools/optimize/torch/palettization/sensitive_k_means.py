@@ -69,7 +69,7 @@ _logger = _logging.getLogger(__name__)
 @_define
 class ModuleSKMPalettizerConfig(_ModuleOptimizationConfig):
     """
-    Configuration class for specifying global and module level palettization options for
+    Configuration class for specifying global and module-level palettization options for
     :py:class:`SKMPalettizer` algorithm.
 
     Args:
@@ -84,7 +84,7 @@ class ModuleSKMPalettizerConfig(_ModuleOptimizationConfig):
         channel_axis (:obj:`int`): Specify the channel axis to form a group of channels.
             Only effective when granularity is ``per_grouped_channel``. Defaults to output channel axis.
         cluster_dim (:obj:`int`): The dimension of centroids for each lookup table.
-            The centroid is a scalar by default. When ``cluster_dim > 1``, it indicates 2-D clustering
+            The centroid is a scalar by default. When ``cluster_dim > 1``, it indicates 2-D clustering,
             and each ``cluster_dim`` length of weight vectors along the output channel are palettized
             using the same 2-D centroid. The length of each entry in the lookup tables is equal to ``cluster_dim``.
         enable_per_channel_scale (:obj:`bool`): When set to ``True``, weights are normalized along the output channels
@@ -96,10 +96,11 @@ class ModuleSKMPalettizerConfig(_ModuleOptimizationConfig):
     table. The ``granularity`` is set to ``per_tensor``, and ``group_size`` is ``None``.
 
     2. **Per-grouped-channel palettization**: In this configuration, the number of channels ``group_size`` along
-    ``channel_axis`` share the same lookup table. For example, for a weight matrix of shape ``(16, 25)``, if we provide 
+    ``channel_axis`` share the same lookup table. For example, for a weight matrix of shape ``(16, 25)``, if we provide
     ``group_size = 8``, the shape of the lookup table would be ``(2, 2^n_bits)``.
 
-    NOTE: Currently grouping is only supported along either the input or output channel axis.
+    .. note::
+        Grouping is currently only supported along either the input or output channel axis.
     """
 
     n_bits: int = _field(default=4, validator=_validators.instance_of(int))
@@ -169,7 +170,7 @@ class SKMPalettizerConfig(_OptimizationConfig):
             Module type configs applied to a specific module class, such as :py:class:`torch.nn.Linear`.
             The keys can be either strings or module classes.
         module_name_configs (:obj:`dict` of :obj:`str` to :py:class:`ModuleSKMPalettizerConfig`):
-            Module level configs applied to specific modules. The name of the module must either be
+            Module-level configs applied to specific modules. The name of the module must either be
             a regex or a fully qualified name that can be used to fetch it from the top level module
             using the ``module.get_submodule(target)`` method.
         calibration_nsamples (:obj:`int`): Number of samples to be used for calibration.
@@ -230,10 +231,10 @@ class SKMPalettizer(_BaseDataCalibratedModelOptimizer):
     on the model weights. The weight values used for weighing different elements of
     a model's weight matrix are computed using the Fisher information matrix, which
     is an approximation of the Hessian. These weight values indicate how sensitive
-    a given weight element is; the more sensitive an element, the larger impact perturbing
-    it (or palettizing it) has on the model's loss function. Thus, weighted k-means
+    a given weight element is: the more sensitive an element, the larger the impact perturbing
+    or palettizing it has on the model’s loss function. This means that weighted k-means
     moves the clusters closer to the sensitive weight values, allowing them to be
-    represented more exactly and thus leading to a lower degradation in model performance
+    represented more exactly. This leads to a lower degradation in model performance
     after palettization. The Fisher information matrix is computed using a few
     samples of calibration data.
 

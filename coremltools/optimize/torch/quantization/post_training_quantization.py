@@ -24,7 +24,7 @@ from attr import field as _field
 from attrs import validators as _validators
 
 from coremltools.converters.mil.mil.ops.defs.iOS18 import constexpr_blockwise_shift_scale
-from coremltools.optimize.coreml._utils import compute_qparams as _ct_compute_qparams
+from coremltools.optimize.coreml._utils import compute_qparams as _cti_compute_qparams
 from coremltools.optimize.torch._utils.metadata_utils import (
     CompressionMetadata as _CompressionMetadata,
 )
@@ -67,17 +67,31 @@ _default_ptq_options = {
 
 _logger = _logging.getLogger(__name__)
 
+_SUPPORTED_WEIGHT_DTYPE = [
+    "int8",
+    "uint8",
+    "int4",
+    "uint4",
+    "fp8_e4m3",
+    "fp8_e5m2",
+    "float32",
+    _torch.int8,
+    _torch.uint8,
+    _torch.float8_e4m3fn,
+    _torch.float8_e5m2,
+    _torch.float32,
+]
 
 @_define
 class ModulePostTrainingQuantizerConfig(_ModuleOptimizationConfig):
     """
-    Configuration class for specifying global and module level quantizer options for
+    Configuration class for specifying global and module-level quantizer options for
     :py:class:`PostTrainingQuantizer` algorithm.
 
     Args:
         weight_dtype (:py:class:`torch.dtype`): The dtype to use for quantizing the weights. The number of bits used
             for quantization is inferred from the dtype. When dtype is set to :py:class:`torch.float32`, the weights
-            corresponding to that layer are not quantized. Defaults to :py:class:`torch.int8` which corresponds to
+            corresponding to that layer are not quantized. Defaults to :py:class:`torch.int8`, which corresponds to
             8-bit quantization.
         granularity (:py:class:`QuantizationGranularity`): Specifies the granularity at which quantization parameters
             will be computed. Can be one of ``per_channel``, ``per_tensor`` or ``per_block``. When using ``per_block``,
@@ -88,9 +102,9 @@ class ModulePostTrainingQuantizerConfig(_ModuleOptimizationConfig):
             zero point can be set anywhere in the range of values allowed for the quantized weight.
             Defaults to ``QuantizationScheme.symmetric``.
         block_size (:obj:`tuple` of :obj:`int` or :obj:`int`): When ``block_size`` is specified, ``block_size``
-            number of values will share the same quantization parameters of scale (and zero point if applicable) across
-            the input channel axis. A tuple of integers can be provided for arbitrary sized blockwise quantization.
-            See below for more details on different possible configurations. Defaults to ``None``.
+            number of values will share the same quantization parameters of scale, as well as the same zero point when applicable, across
+            the input channel axis. A tuple of integers can be provided for arbitrarily sized blockwise quantization.
+            See more details on different possible configurations below. Defaults to ``None``.
 
     This class supports three different configurations to structure the quantization:
 
@@ -98,21 +112,21 @@ class ModulePostTrainingQuantizerConfig(_ModuleOptimizationConfig):
     ``block_size`` is ``None``. In this configuration, quantization parameters are computed for each output channel.
 
     2. **Per-tensor quantization**: In this configuration, quantization parameters are computed for the tensor as a whole. That is,
-    all values in the tensor will share a single scale (and a single zero point if applicable). The ``granularity`` argument is set
+    all values in the tensor will share a single scale and, if applicable, a single zero point. The ``granularity`` argument is set
     to ``per_tensor``.
 
-    3. **Per-block quantization**: This configuration is used to structure the tensor for blockwise quantization. The ``granularity`` 
-    is set to ``per_block`` and the ``block_size`` argument has to be specified. The ``block_size`` argument can either be of type
+    3. **Per-block quantization**: This configuration is used to structure the tensor for blockwise quantization. The ``granularity``
+    is set to ``per_block``, and the ``block_size`` argument has to be specified. The ``block_size`` argument can either be of type
     ``int`` or ``tuple``:
-        * int: In this case, each row along the output-channel axis will have its own quantization parameters (similar to ``per_channel``).
-               Additionally, ``block_size`` number of values will share the same quantization parameters, along the input channel axis.
+        * int: In this configuration, each row along the output channel axis will have its own quantization parameters, similar to the ``per_channel`` configuration.
+               Additionally, ``block_size`` number of values will share the same quantization parameters along the input channel axis.
                For example, for a weight matrix of shape ``(10, 10)``, if we provide ``block_size = 2``, the shape of the quantization
                parameters would be ``(10, 5)``.
-        * tuple: For more advanced configuration, users can provide an arbitrary n-dimensional block to share the quantization parameters.
-                 This is specified in the form of a tuple where each value corresponds to the block size for the respective axis of the
+        * tuple: For a more advanced configuration, users can provide an arbitrary n-dimensional block to share the quantization parameters.
+                 This is specified in the form of a tuple, where each value corresponds to the block size for the respective axis of the
                  weight matrix. The length of the provided tuple should be at most the number of dimensions of the weight matrix.
 
-    .. note:
+    .. note::
         When performing 4-bit quantization, ``weight_dtype`` is set to :py:class:`torch.int8` for ``int4`` or
         :py:class:`torch.uint8` for ``uint4``. This is because PyTorch currently doesn't provide support for 4-bit
         data types. However, the quantization range is set according to 4-bit quantization and based on
@@ -120,11 +134,6 @@ class ModulePostTrainingQuantizerConfig(_ModuleOptimizationConfig):
     """
     weight_dtype: _Union[str, _torch.dtype] = _field(
         default=_default_ptq_options["weight_dtype"],
-        converter=_maybe_convert_str_to_dtype,
-        validator=[
-            _validators.instance_of(_torch.dtype),
-            _validators.in_([_torch.int8, _torch.uint8, _torch.float32]),
-        ],
     )
     granularity: QuantizationGranularity = _field(
         default=_default_ptq_options["granularity"],
@@ -148,7 +157,12 @@ class ModulePostTrainingQuantizerConfig(_ModuleOptimizationConfig):
     )
 
     def __attrs_post_init__(self):
+        if self.weight_dtype not in _SUPPORTED_WEIGHT_DTYPE:
+            raise ValueError(
+                f"weight_dtype must be one of {_SUPPORTED_WEIGHT_DTYPE} not {self.weight_dtype}"
+            )
         self.weight_n_bits = _get_n_bits_from_dtype(self.weight_dtype)
+        self.weight_dtype = _maybe_convert_str_to_dtype(self.weight_dtype)
 
     @block_size.validator
     def per_block_granularity(self, attribute, value):
@@ -251,12 +265,12 @@ class PostTrainingQuantizer(_BasePostTrainingModelOptimizer):
     """
     Perform post-training quantization on a torch model. After quantization, weights of all
     submodules selected for quantization contain full precision values obtained by quantizing
-    and dequantizing the original weights which captures the error induced by quantization.
+    and dequantizing the original weights, which captures the error induced by quantization.
 
     .. note::
-        After quantization, the weight values stored will still remain in full precision, therefore
+        After quantization, the weight values stored will still remain in full precision, so
         the PyTorch model size will not be reduced. To see the reduction in model size, please convert
-        the model using ``coremltools.convert(...)``, which will produce a model intermediate language 
+        the model using ``coremltools.convert(...)``, which will produce a model intermediate language
         (MIL) model containing the compressed weights.
 
         Example:
@@ -281,7 +295,7 @@ class PostTrainingQuantizer(_BasePostTrainingModelOptimizer):
                 )
 
                 # initialize the quantizer
-                config = PostTrainingQuantizerConfig.from_dict(
+                config = PostTrainingquantizerConfig.from_dict(
                     {
                         "global_config": {
                             "weight_dtype": "int8",
@@ -345,7 +359,7 @@ class PostTrainingQuantizer(_BasePostTrainingModelOptimizer):
         Compute quantization parameters
         """
 
-        ret = _ct_compute_qparams(
+        ret = _cti_compute_qparams(
             weight=weight,
             nbits=nbits,
             quantization_mode=quantization_mode,

@@ -15,6 +15,8 @@ from coremltools.converters.mil.mil import types
 
 from .utils import TORCH_DTYPE_TO_MIL_DTYPE
 
+WRAPPED_SCALAR_INPUT_SUFFIX = "_wrapped_as_tensor_for_coreml"
+
 
 def _map_sympy_number_to_int(sympy_number: sympy.core.numbers.Number) -> int:
     MAX_DIM = 2147483647
@@ -25,7 +27,6 @@ def _map_sympy_number_to_int(sympy_number: sympy.core.numbers.Number) -> int:
 
 
 def _construct_ct_range_dim_from_torch_value_ranges(
-    symbol_name: str,
     value_ranges,  # torch.utils._sympy.value_ranges.ValueRanges
 ) -> RangeDim:
     if value_ranges.is_bool:
@@ -33,7 +34,7 @@ def _construct_ct_range_dim_from_torch_value_ranges(
 
     lower = _map_sympy_number_to_int(value_ranges.lower)
     upper = _map_sympy_number_to_int(value_ranges.upper)
-    return RangeDim(lower_bound=lower, upper_bound=upper, symbol=symbol_name)
+    return RangeDim(lower_bound=lower, upper_bound=upper)
 
 
 def _construct_symbol_name_to_ct_range_dim_dict(
@@ -43,7 +44,7 @@ def _construct_symbol_name_to_ct_range_dim_dict(
     for symbol, value_ranges in exported_program.range_constraints.items():
         symbol_name = str(symbol)
         symbol_name_to_ct_range_dim[symbol_name] = _construct_ct_range_dim_from_torch_value_ranges(
-            symbol_name, value_ranges
+            value_ranges
         )
     return symbol_name_to_ct_range_dim
 
@@ -54,7 +55,6 @@ def _construct_ct_tensor_type_from_torch(
     symbol_name_to_ct_range_dim: Dict[str, RangeDim],
 ) -> TensorType:
     coreml_dtype = TORCH_DTYPE_TO_MIL_DTYPE[tensor.dtype]
-    # TODO (rdar://115845792): Once we support user inputs, we can migrate this check to inputs validation
     if coreml_dtype == types.int16:
         coreml_dtype = types.int32
         logger.warning(
@@ -68,6 +68,14 @@ def _construct_ct_tensor_type_from_torch(
             shape.append(symbol_name_to_ct_range_dim[size_str])
         else:
             shape.append(int(size))
+
+    if len(shape) == 0:
+        shape = [1]
+        logger.warning(
+            "Core ML does not support scalar input, "
+            f"so {name} has been wrapped as rank-1 size-1 tensor"
+        )
+        name = name + WRAPPED_SCALAR_INPUT_SUFFIX
 
     return TensorType(name=name, dtype=coreml_dtype, shape=shape)
 
@@ -219,6 +227,12 @@ def _extract_inputs_from_exir_program(
                 raise NotImplementedError(
                     "Placeholder val must be a tensor or fake tensor, "
                     f"but got type {type(val)}, value {str(val)}"
+                )
+            if val.dim_order() != tuple(range(val.dim())):
+                # TODO (rdar://139251491) Core ML can support a special case:
+                # rank-4 (0, 2, 3, 1) dim order, i.e. ct.ImageType(channel_first=False)
+                raise NotImplementedError(
+                    "Core ML does not have general support for non-contiguous dim order"
                 )
             torch_user_inputs[node.name] = val
 

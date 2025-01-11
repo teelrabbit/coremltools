@@ -19,16 +19,18 @@ import coremltools as ct
 from coremltools import _SPECIFICATION_VERSION_IOS_18, proto
 from coremltools.converters.mil import mil
 from coremltools.converters.mil.converter import mil_convert as _mil_convert
-from coremltools.converters.mil.mil import Program
+from coremltools.converters.mil.mil import Program, types
 from coremltools.converters.mil.mil.builder import Builder as mb
 from coremltools.converters.mil.mil.passes.pass_pipeline import (
-    PASS_REGISTRY,
     PassPipeline,
     PassPipelineManager,
 )
 from coremltools.converters.mil.testing_utils import assert_spec_input_type, assert_spec_output_type, DTYPE_TO_FEATURE_TYPE_MAP, get_op_types_in_program
-from coremltools.models.utils import bisect_model, MultiFunctionDescriptor, load_spec, save_multifunction, load_spec
+from coremltools.models.datatypes import Array
+from coremltools.models.utils import bisect_model, MultiFunctionDescriptor, load_spec, save_multifunction, load_spec, change_input_output_tensor_type
+from coremltools.proto.FeatureTypes_pb2 import ArrayFeatureType
 import coremltools.optimize as cto
+
 
 class TestMILConvertCall:
     @staticmethod
@@ -66,13 +68,13 @@ class TestMILConvertCall:
 class TestMultiFunctionDescriptor:
     @staticmethod
     def _convert_multifunction_prog(prog):
+        prog.export_as_multifunction = True
         mlmodel = _mil_convert(
             prog,
             convert_to="mlprogram",
             convert_from="milinternal",
             specification_version=_SPECIFICATION_VERSION_IOS_18,
             compute_units=ct.ComputeUnit.CPU_ONLY,
-            export_multi_functions=True,
             skip_model_load=True,
         )
         package_path = tempfile.mkdtemp(suffix=".mlpackage")
@@ -686,6 +688,7 @@ class TestMultiFunctionModelEnd2End:
                 x = self.linear1(torch.flatten(x))
                 return x
 
+
         model = TestModel().eval()
         example_input = torch.rand(1, 1, 28, 28)
         return torch.jit.trace(model, example_input)
@@ -704,6 +707,7 @@ class TestMultiFunctionModelEnd2End:
             def forward(self, x):
                 return self.linear1(x)
 
+
         class TestModel(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -716,6 +720,7 @@ class TestMultiFunctionModelEnd2End:
                 x = self.bn1(x)
                 x = self.linear1(torch.flatten(x))
                 return x
+
 
         example_input = torch.rand(1, 1, 28, 28)
         model = TestModel().eval()
@@ -737,6 +742,9 @@ class TestMultiFunctionModelEnd2End:
 
         After merging model_1 with model_2, the base weights should be shared.
         """
+        if platform.machine() == "x86_64":
+            pytest.xfail("rdar://137217263")
+
         traced_model_1, traced_model_2 = self._get_test_model_2()
         input = np.random.rand(1, 1, 28, 28)
 
@@ -793,33 +801,29 @@ class TestMultiFunctionModelEnd2End:
             np.testing.assert_allclose(gt_output_2, output)
 
         # make sure the weights are deduplicated
-        with tempfile.TemporaryDirectory() as serialize_dir:
-            os.system(f"coremlcompiler compile {saved_package_path} {serialize_dir}")
-            model_name_with_extension = os.path.basename(saved_package_path)
-            model_name_wo_extension, _ = os.path.splitext(model_name_with_extension)
-            mil_file = open(
-                os.path.join(serialize_dir, f"{model_name_wo_extension}.mlmodelc", "model.mil")
+        default_model = ct.models.MLModel(saved_package_path)
+        mil_file = open(os.path.join(default_model.get_compiled_model_path(), "model.mil"))
+        mil_txt = mil_file.read()
+        assert (
+            mil_txt.count(
+                'const()[name = string("const_0_to_fp16"), val = tensor<fp16, [8, 1, 5, 5]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(64)))];'
             )
-            mil_txt = mil_file.read()
-            assert (
-                mil_txt.count(
-                    'const()[name = string("const_0_to_fp16"), val = tensor<fp16, [8, 1, 5, 5]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(64)))];'
-                )
-                == 2
+            == 2
+        )
+        assert (
+            mil_txt.count(
+                'tensor<fp16, [5, 6272]> linear1_linear1_weight_to_fp16 = const()[name = string("linear1_linear1_weight_to_fp16"), val = tensor<fp16, [5, 6272]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(576)))];'
             )
-            assert (
-                mil_txt.count(
-                    'tensor<fp16, [5, 6272]> linear1_linear1_weight_to_fp16 = const()[name = string("linear1_linear1_weight_to_fp16"), val = tensor<fp16, [5, 6272]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(576)))];'
-                )
-                == 1
+            == 1
+        )
+        assert (
+            mil_txt.count(
+                'tensor<fp16, [5, 6272]> linear1_linear1_weight_to_fp16 = const()[name = string("linear1_linear1_weight_to_fp16"), val = tensor<fp16, [5, 6272]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(63360)))];'
             )
-            assert (
-                mil_txt.count(
-                    'tensor<fp16, [5, 6272]> linear1_linear1_weight_to_fp16 = const()[name = string("linear1_linear1_weight_to_fp16"), val = tensor<fp16, [5, 6272]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(63360)))];'
-                )
-                == 1
-            )
+            == 1
+        )
         shutil.rmtree(saved_package_path)
+
 
     def test_single_model(self):
         """
@@ -865,6 +869,9 @@ class TestMultiFunctionModelEnd2End:
         """
         Copy a single model 10 times and create a multi-functions model with 10 functions.
         """
+        if platform.machine() == "x86_64":
+            pytest.xfail("rdar://137217263")
+
         traced_model = self._get_test_model()
         input = np.random.rand(1, 1, 28, 28)
         NUM_MODEL = 10
@@ -912,26 +919,21 @@ class TestMultiFunctionModelEnd2End:
                 np.testing.assert_allclose(gt_output, output)
 
         # make sure the weights are deduplicated
-        with tempfile.TemporaryDirectory() as serialize_dir:
-            os.system(f"coremlcompiler compile {saved_package_path} {serialize_dir}")
-            model_name_with_extension = os.path.basename(saved_package_path)
-            model_name_wo_extension, _ = os.path.splitext(model_name_with_extension)
-            mil_file = open(
-                os.path.join(serialize_dir, f"{model_name_wo_extension}.mlmodelc", "model.mil")
+        default_model = ct.models.MLModel(saved_package_path)
+        mil_file = open(os.path.join(default_model.get_compiled_model_path(), "model.mil"))
+        mil_txt = mil_file.read()
+        assert (
+            mil_txt.count(
+                'const()[name = string("const_0_to_fp16"), val = tensor<fp16, [8, 1, 5, 5]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(64)))];'
             )
-            mil_txt = mil_file.read()
-            assert (
-                mil_txt.count(
-                    'const()[name = string("const_0_to_fp16"), val = tensor<fp16, [8, 1, 5, 5]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(64)))];'
-                )
-                == 10
+            == 10
+        )
+        assert (
+            mil_txt.count(
+                'tensor<fp16, [5, 6272]> linear1_weight_to_fp16 = const()[name = string("linear1_weight_to_fp16"), val = tensor<fp16, [5, 6272]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(576)))];'
             )
-            assert (
-                mil_txt.count(
-                    'tensor<fp16, [5, 6272]> linear1_weight_to_fp16 = const()[name = string("linear1_weight_to_fp16"), val = tensor<fp16, [5, 6272]>(BLOBFILE(path = string("@model_path/weights/weight.bin"), offset = uint64(576)))];'
-                )
-                == 10
-            )
+            == 10
+        )
         shutil.rmtree(saved_package_path)
 
 
@@ -1086,17 +1088,14 @@ class TestMaterializeSymbolicShapeMLModel:
         torch_model.eval()
         return torch_model
 
+
     @staticmethod
     def read_mil_text(mlpackage_path: str) -> str:
-        with tempfile.TemporaryDirectory() as serialize_dir:
-            os.system(f"coremlcompiler compile {mlpackage_path} {serialize_dir}")
-            model_name_with_extension = os.path.basename(mlpackage_path)
-            model_name_wo_extension, _ = os.path.splitext(model_name_with_extension)
-            mil_file = open(
-                os.path.join(serialize_dir, f"{model_name_wo_extension}.mlmodelc", "model.mil")
-            )
-            mil_text = mil_file.read()
+        mlmodel = ct.models.MLModel(mlpackage_path)
+        mil_file = open(os.path.join(mlmodel.get_compiled_model_path(), "model.mil"))
+        mil_text = mil_file.read()
         return mil_text
+
 
     @pytest.mark.parametrize(
         "symbolic_shape, override_main_function, reload_mlmodel",
@@ -1211,6 +1210,7 @@ class TestMaterializeSymbolicShapeMLModel:
     @pytest.mark.skipif(
         ct.utils._macos_version() < (15, 0), reason="State only supported on macOS 15+"
     )
+    @pytest.mark.xfail(reason="rdar://138957606 ([Bug] Stateful model regression in CoreML)")
     @pytest.mark.parametrize(
         "symbolic_shape, override_main_function, reload_mlmodel",
         itertools.product(
@@ -1400,12 +1400,6 @@ class TestMaterializeSymbolicShapeMLModel:
             )
             PassPipelineManager.apply_pipeline(dynamic_shape_prog, pass_pipeline)
 
-            # Weights are duplicated in each materialized new function
-            # By default, graph pass const_deduplication will not deduplicate across functions,
-            # so we need to call it explicitly here
-            const_deduplication_pass = PASS_REGISTRY["common::const_deduplication"]
-            const_deduplication_pass._deduplicate_const_across_functions(dynamic_shape_prog)
-
             # Source function may no longer be needed,
             # e.g. if it has intermediate symbolic-shape state
             dynamic_shape_prog.functions.pop("main")
@@ -1414,13 +1408,13 @@ class TestMaterializeSymbolicShapeMLModel:
             )[0]
 
             dynamic_shape_prog.skip_all_passes = True
+            dynamic_shape_prog.export_as_multifunction = True
             materialized_mlmodel = _mil_convert(
                 dynamic_shape_prog,
                 convert_from="milinternal",
                 convert_to="mlprogram",
                 specification_version=ct.target.iOS18,
                 compute_units=ct.ComputeUnit.CPU_ONLY,
-                export_multi_functions=True,
                 skip_model_load=True,
             )
             materialized_mlmodel.save(destination_path)
@@ -1789,3 +1783,110 @@ class TestBisectModel:
         # clean up
         shutil.rmtree(output_dir)
         shutil.rmtree(model_path)
+
+
+class TestChangeInputOutputTensorType:
+    @staticmethod
+    def _build_simple_model(dtype, function_names):
+        weight_dtype = np.float16 if dtype == types.fp16 else np.float32
+
+        @mb.function(input_specs=[mb.TensorSpec(shape=(1, 3), dtype=dtype)], opset_version=ct.target.iOS16)
+        def func(x):
+            return mb.linear(x=x, weight=np.random.rand(2, 3).astype(weight_dtype))
+
+        prog = mil.Program()
+        for function_name in function_names:
+            prog.add_function(function_name, func)
+
+        return _mil_convert(
+            prog,
+            convert_to="mlprogram",
+            convert_from="milinternal",
+            specification_version=ct.target.iOS16,
+            compute_units=ct.ComputeUnit.CPU_ONLY,
+            skip_model_load=True,
+        )
+
+    @pytest.mark.parametrize(
+        "dtype, from_feature_type, to_feature_type", (
+                (types.fp16, ArrayFeatureType.FLOAT16, ArrayFeatureType.FLOAT32),
+                (types.fp32, ArrayFeatureType.FLOAT32, ArrayFeatureType.FLOAT16),
+        )
+    )
+    def test_change_input_type(self, dtype, from_feature_type, to_feature_type) -> None:
+        model = self._build_simple_model(dtype=dtype, function_names=["main"])
+        orig_input = model.get_spec().description.input[0]
+        assert orig_input.type.multiArrayType.dataType == from_feature_type
+
+        updated_model = change_input_output_tensor_type(
+            ml_model=model,
+            from_type=from_feature_type,
+            to_type=to_feature_type,
+            input_names=["x"],
+            output_names=[],
+        )
+        updated_input = updated_model.get_spec().description.input[0]
+        assert updated_input.type.multiArrayType.dataType == to_feature_type
+
+    @pytest.mark.parametrize(
+        "dtype, from_feature_type, to_feature_type", (
+                (types.fp16, ArrayFeatureType.FLOAT16, ArrayFeatureType.FLOAT32),
+                (types.fp32, ArrayFeatureType.FLOAT32, ArrayFeatureType.FLOAT16),
+        )
+    )
+    def test_change_input_type_multifunc(self, dtype, from_feature_type, to_feature_type) -> None:
+        function_names = ["main", "main_2"]
+        model = self._build_simple_model(dtype=dtype, function_names=function_names)
+        for orig_output in model.get_spec().description.output:
+            assert orig_output.type.multiArrayType.dataType == from_feature_type
+
+        updated_model = change_input_output_tensor_type(
+            ml_model=model,
+            from_type=from_feature_type,
+            to_type=to_feature_type,
+            function_names=function_names,
+            input_names=["*"],
+            output_names=[],
+        )
+        for updated_input in updated_model.get_spec().description.input:
+            assert updated_input.type.multiArrayType.dataType == to_feature_type
+
+    @pytest.mark.parametrize(
+        "dtype, from_feature_type, to_feature_type", (
+                (types.fp16, ArrayFeatureType.FLOAT16, ArrayFeatureType.FLOAT32),
+                (types.fp32, ArrayFeatureType.FLOAT32, ArrayFeatureType.FLOAT16),
+        )
+    )
+    def test_change_output_type(self, dtype, from_feature_type, to_feature_type) -> None:
+        model = self._build_simple_model(dtype=dtype, function_names=["main"])
+        orig_output = model.get_spec().description.output[0]
+        assert orig_output.type.multiArrayType.dataType == from_feature_type
+
+        updated_model = change_input_output_tensor_type(
+            ml_model=model,
+            from_type=from_feature_type,
+            to_type=to_feature_type,
+        )
+        updated_output = updated_model.get_spec().description.output[0]
+        assert updated_output.type.multiArrayType.dataType == to_feature_type
+
+    @pytest.mark.parametrize(
+        "dtype, from_feature_type, to_feature_type", (
+                (types.fp16, ArrayFeatureType.FLOAT16, ArrayFeatureType.FLOAT32),
+                (types.fp32, ArrayFeatureType.FLOAT32, ArrayFeatureType.FLOAT16),
+        )
+    )
+    def test_change_output_type_multifunc(self, dtype, from_feature_type, to_feature_type) -> None:
+        function_names = ["main", "main_2"]
+        model = self._build_simple_model(dtype=dtype, function_names=function_names)
+        for orig_output in model.get_spec().description.output:
+            assert orig_output.type.multiArrayType.dataType == from_feature_type
+
+        updated_model = change_input_output_tensor_type(
+            ml_model=model,
+            from_type=from_feature_type,
+            to_type=to_feature_type,
+            function_names=function_names,
+        )
+        for updated_output in updated_model.get_spec().description.output:
+            assert updated_output.type.multiArrayType.dataType == to_feature_type

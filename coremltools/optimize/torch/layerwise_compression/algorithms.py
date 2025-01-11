@@ -59,28 +59,27 @@ class LayerwiseCompressionAlgorithmConfig(_ABC, _ClassRegistryMixin, _ModuleOpti
 @_define
 class ModuleGPTQConfig(LayerwiseCompressionAlgorithmConfig):
     """
-    Configuration class for specifying global and module level compression options for the
+    Configuration class for specifying global and module-level compression options for the
     `Generative Pre-Trained Transformer Quantization (GPTQ) <https://arxiv.org/pdf/2210.17323.pdf>`_ algorithm.
 
     Args:
         weight_dtype (:py:class:`torch.dtype`): The dtype to use for quantizing the weights. The number of bits used
             for quantization is inferred from the dtype. When dtype is set to :py:class:`torch.float32`, the weights
-            corresponding to that layer are not quantized. Defaults to :py:class:`torch.uint8` which corresponds to
+            corresponding to that layer are not quantized. Defaults to :py:class:`torch.uint8`, which corresponds to
             8-bit quantization.
         granularity (:py:class:`QuantizationGranularity`): Specifies the granularity at which quantization parameters
             will be computed. Can be one of ``per_channel``, ``per_tensor`` or ``per_block``. When using ``per_block``,
             ``block_size`` argument must be specified. Defaults to ``per_channel``.
-        quantization_scheme: (:py:class:`~.coremltools.optimize.torch.quantization.quantization_config.QuantizationScheme`): Type of
+        quantization_scheme (:py:class:`~.coremltools.optimize.torch.quantization.quantization_config.QuantizationScheme`): Type of
             quantization configuration to use. When this parameter is set to ``QuantizationScheme.symmetric``, all
             weights are quantized with zero point as zero. When it is set to ``QuantizationScheme.affine``, zero point
             can be set anywhere in the range of values allowed for the quantized weight.
             Defaults to ``QuantizationScheme.symmetric``.
-         block_size (:obj:`int`): When ``block_size`` is specified, ``block_size``
-            number of values will share the same quantization parameters of scale (and zero point if applicable) across
-            the input-channel axis. Defaults to ``None``.
+        block_size (:obj:`int`): When ``block_size`` is specified, ``block_size`` number of values will share the same quantization
+            parameters of scale, as well as the same zero point when applicable, across the input channel axis. Defaults to ``None``.
         enable_normal_float (:obj:`bool`): When ``True``, normal float format is used for quantization. It's
             only supported when ``weight_dtype`` is equal to ``int3`` and ``int4``. Defaults to ``False``.
-        hessian_dampening: (:obj:`float`): Dampening factor added to the diagonal of the
+        hessian_dampening (:obj:`float`): Dampening factor added to the diagonal of the
             Hessian used by GPTQ algorithm. Defaults to ``0.01``.
         use_activation_order_heuristic (:obj:`bool`): When ``True``, columns of weight are sorted
             in descending order of values of Hessian diagonal elements. Defaults to ``True``.
@@ -139,7 +138,7 @@ class ModuleGPTQConfig(LayerwiseCompressionAlgorithmConfig):
 @_define
 class ModuleSparseGPTConfig(LayerwiseCompressionAlgorithmConfig):
     """
-    Configuration class for specifying global and module level compression options for the
+    Configuration class for specifying global and module-level compression options for the
     `Sparse Generative Pre-Trained Transformer (SparseGPT) <https://arxiv.org/pdf/2301.00774.pdf>`_ algorithm.
 
     Args:
@@ -151,12 +150,12 @@ class ModuleSparseGPTConfig(LayerwiseCompressionAlgorithmConfig):
             target sparsity is determined by the ``n:m`` ratio.
         weight_dtype (:py:class:`torch.dtype`): The dtype to use for quantizing the weights. The number of bits used
             for quantization is inferred from the dtype. When dtype is set to :py:class:`torch.float32`, the weights
-            corresponding to that layer are not quantized. Defaults to :py:class:`torch.float32` which corresponds to
+            corresponding to that layer are not quantized. Defaults to :py:class:`torch.float32`, which corresponds to
             no quantization.
         quantization_granularity (:py:class:`QuantizationGranularity`): Specifies the granularity at which quantization parameters
             will be computed. Can be one of ``per_channel``, ``per_tensor`` or ``per_block``. When using ``per_block``,
             ``block_size`` argument must be specified. Defaults to ``per_channel``.
-        quantization_scheme: (:py:class:`~.coremltools.optimize.torch.quantization.quantization_config.QuantizationScheme`): Type of
+        quantization_scheme (:py:class:`~.coremltools.optimize.torch.quantization.quantization_config.QuantizationScheme`): Type of
             quantization configuration to use. When this parameter is set to ``QuantizationScheme.symmetric``, all
             weights are quantized with zero point as zero. When it is set to ``QuantizationScheme.affine``, zero point
             can be set anywhere in the range of values allowed for the quantized weight.
@@ -201,9 +200,9 @@ class ModuleSparseGPTConfig(LayerwiseCompressionAlgorithmConfig):
     def __attrs_post_init__(self):
         self.weight_n_bits = _get_n_bits_from_dtype(self.weight_dtype)
         self.weight_dtype = _maybe_convert_str_to_dtype(self.weight_dtype)
-        if self.weight_dtype not in [_torch.uint8, _torch.float32]:
+        if self.weight_dtype not in [_torch.uint8, _torch.float16, _torch.float32]:
             raise ValueError(
-                f"weight_dtype must be one of (torch.uint8, torch.float32) not {self.weight_dtype}"
+                f"weight_dtype must be one of (torch.uint8, torch.float16, torch.float32) not {self.weight_dtype}"
             )
 
     @classmethod
@@ -347,13 +346,13 @@ class OBSCompressionAlgorithm(LayerwiseCompressionAlgorithm):
 @LayerwiseCompressionAlgorithm.register("gptq")
 class GPTQ(OBSCompressionAlgorithm):
     """
-    A post training compression algorithm based on the paper
+    A post-training compression algorithm based on the paper
     `GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers
     <https://arxiv.org/pdf/2210.17323.pdf>`_.
 
     Args:
         layer (:obj:`torch.nn.Module`): Module to be compressed.
-        config (:py:class:`ModuleGPTQConfig`): Config specifying hyper-parameters
+        config (:py:class:`ModuleGPTQConfig`): Config specifying hyperparameters
             for the GPTQ algorithm.
     """
 
@@ -528,9 +527,9 @@ class GPTQ(OBSCompressionAlgorithm):
 @LayerwiseCompressionAlgorithm.register("sparse_gpt")
 class SparseGPT(OBSCompressionAlgorithm):
     """
-    A post training compression algorithm based on the paper
+    A post-training compression algorithm based on the paper
     `SparseGPT: Massive Language Models Can be Accurately Pruned in One-Shot
-    <https://arxiv.org/pdf/2301.00774.pdf>`_
+    <https://arxiv.org/pdf/2301.00774.pdf>`_.
 
     Args:
         layer (:obj:`torch.nn.Module`): Module to be compressed.
@@ -572,7 +571,9 @@ class SparseGPT(OBSCompressionAlgorithm):
         weight = self._layer.weight.data.clone()
         if isinstance(self._layer, _nn.Conv2d):
             weight = weight.flatten(1)
-        weight = weight.float()
+
+        if self._config.weight_dtype in [_torch.float32, _torch.float16]:
+            weight = weight.to(self._config.weight_dtype)
 
         if self._quantizer is not None and not self._quantizer.ready():
             self._quantizer.find_params(weight, weight=True)
@@ -581,6 +582,7 @@ class SparseGPT(OBSCompressionAlgorithm):
         tick = _time.time()
 
         hessian = self._hessian
+
         del self._hessian
         dead = _torch.diag(hessian) == 0
         hessian[dead, dead] = 1
@@ -595,6 +597,10 @@ class SparseGPT(OBSCompressionAlgorithm):
         hessian = _torch.cholesky_inverse(hessian)
         hessian = _torch.linalg.cholesky(hessian, upper=True)
         hessian_inverse = hessian
+
+        # Hessian computation happens in float32, and _torch.linalg.cholesky does not support float16, so we cast here
+        if self._config.weight_dtype in [_torch.float32, _torch.float16]:
+            hessian_inverse = hessian_inverse.to(self._config.weight_dtype)
 
         mask = None
 
